@@ -44,6 +44,10 @@ _Avoid_: hybrid mode, federation
 An Entra object whose source is an AD object, brought across by sync.
 _Avoid_: hybrid object, linked object
 
+**Counterpart**:
+The object on the other side that the same identity is linked to: the Entra object of a synced AD object, or the AD object of a synced Entra one.
+_Avoid_: twin, mirror, linked object
+
 **Source of authority**:
 The side where an object's attributes may be changed; the forest for a synced object, the tenant for a cloud-only one.
 _Avoid_: master, owner, origin
