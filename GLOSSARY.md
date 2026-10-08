@@ -18,6 +18,14 @@ _Avoid_: realm, naming context (unless meaning the LDAP partition)
 A server hosting a domain's copy of the directory that the server process connects to.
 _Avoid_: DC server, AD server, LDAP server
 
+**Global catalog**:
+A domain controller that also holds a partial, read-only copy of every domain in the forest; where forest-wide finds go.
+_Avoid_: GC server, forest index
+
+**PDC emulator**:
+The one domain controller per domain that processes lockouts and receives password changes first; where that domain's writes go.
+_Avoid_: primary DC, PDC (alone), master DC
+
 **Tenant**:
 The single Entra ID organization a server process talks to.
 _Avoid_: instance, account, Azure AD, directory (alone)
