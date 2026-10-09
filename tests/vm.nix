@@ -15,7 +15,7 @@
 #                            /var/lib/samba-dc/vm-synced-sid (onPremisesSyncBehavior refused: 403)
 #                            PATCH of a user's accountEnabled, passwordProfile or other properties; POST
 #                            of a cloud user, its DELETE and restore from deletedItems; the synced
-#                            user's assignLicense; empty role
+#                            user's assignLicense; a managed device, its GET and actions (204); empty role
 #                            assignments, memberships and ownerships; every write recorded in /tmp/stub-writes
 #   microsoft-directory-mcp  the module's HTTP service
 #
@@ -47,8 +47,8 @@ let
   # vmuser042's objectSid, written at provisioning for the stub's synced user.
   syncedSid = "/var/lib/samba-dc/vm-synced-sid";
   # An unsigned JWT the server decodes for the startup probe. Payload:
-  # {"aud":"https://graph.microsoft.com","roles":["Organization.Read.All","User.Read.All","LicenseAssignment.Read.All","GroupMember.Read.All","Device.Read.All","Application.Read.All","AuditLog.Read.All","User.EnableDisableAccount.All","User.RevokeSessions.All","RoleManagement.Read.Directory","User-PasswordProfile.ReadWrite.All","UserAuthMethod-TAP.ReadWrite.All","UserAuthenticationMethod.ReadWrite.All","GroupMember.ReadWrite.All","User.ReadWrite.All","User.DeleteRestore.All"]}
-  accessToken = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJhdWQiOiJodHRwczovL2dyYXBoLm1pY3Jvc29mdC5jb20iLCJyb2xlcyI6WyJPcmdhbml6YXRpb24uUmVhZC5BbGwiLCJVc2VyLlJlYWQuQWxsIiwiTGljZW5zZUFzc2lnbm1lbnQuUmVhZC5BbGwiLCJHcm91cE1lbWJlci5SZWFkLkFsbCIsIkRldmljZS5SZWFkLkFsbCIsIkFwcGxpY2F0aW9uLlJlYWQuQWxsIiwiQXVkaXRMb2cuUmVhZC5BbGwiLCJVc2VyLkVuYWJsZURpc2FibGVBY2NvdW50LkFsbCIsIlVzZXIuUmV2b2tlU2Vzc2lvbnMuQWxsIiwiUm9sZU1hbmFnZW1lbnQuUmVhZC5EaXJlY3RvcnkiLCJVc2VyLVBhc3N3b3JkUHJvZmlsZS5SZWFkV3JpdGUuQWxsIiwiVXNlckF1dGhNZXRob2QtVEFQLlJlYWRXcml0ZS5BbGwiLCJVc2VyQXV0aGVudGljYXRpb25NZXRob2QuUmVhZFdyaXRlLkFsbCIsIkdyb3VwTWVtYmVyLlJlYWRXcml0ZS5BbGwiLCJVc2VyLlJlYWRXcml0ZS5BbGwiLCJVc2VyLkRlbGV0ZVJlc3RvcmUuQWxsIl19.stub";
+  # {"aud":"https://graph.microsoft.com","roles":["Organization.Read.All","User.Read.All","LicenseAssignment.Read.All","GroupMember.Read.All","Device.Read.All","Application.Read.All","AuditLog.Read.All","User.EnableDisableAccount.All","User.RevokeSessions.All","RoleManagement.Read.Directory","User-PasswordProfile.ReadWrite.All","UserAuthMethod-TAP.ReadWrite.All","UserAuthenticationMethod.ReadWrite.All","GroupMember.ReadWrite.All","User.ReadWrite.All","User.DeleteRestore.All","DeviceManagementManagedDevices.Read.All","DeviceManagementManagedDevices.PrivilegedOperations.All"]}
+  accessToken = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJhdWQiOiJodHRwczovL2dyYXBoLm1pY3Jvc29mdC5jb20iLCJyb2xlcyI6WyJPcmdhbml6YXRpb24uUmVhZC5BbGwiLCJVc2VyLlJlYWQuQWxsIiwiTGljZW5zZUFzc2lnbm1lbnQuUmVhZC5BbGwiLCJHcm91cE1lbWJlci5SZWFkLkFsbCIsIkRldmljZS5SZWFkLkFsbCIsIkFwcGxpY2F0aW9uLlJlYWQuQWxsIiwiQXVkaXRMb2cuUmVhZC5BbGwiLCJVc2VyLkVuYWJsZURpc2FibGVBY2NvdW50LkFsbCIsIlVzZXIuUmV2b2tlU2Vzc2lvbnMuQWxsIiwiUm9sZU1hbmFnZW1lbnQuUmVhZC5EaXJlY3RvcnkiLCJVc2VyLVBhc3N3b3JkUHJvZmlsZS5SZWFkV3JpdGUuQWxsIiwiVXNlckF1dGhNZXRob2QtVEFQLlJlYWRXcml0ZS5BbGwiLCJVc2VyQXV0aGVudGljYXRpb25NZXRob2QuUmVhZFdyaXRlLkFsbCIsIkdyb3VwTWVtYmVyLlJlYWRXcml0ZS5BbGwiLCJVc2VyLlJlYWRXcml0ZS5BbGwiLCJVc2VyLkRlbGV0ZVJlc3RvcmUuQWxsIiwiRGV2aWNlTWFuYWdlbWVudE1hbmFnZWREZXZpY2VzLlJlYWQuQWxsIiwiRGV2aWNlTWFuYWdlbWVudE1hbmFnZWREZXZpY2VzLlByaXZpbGVnZWRPcGVyYXRpb25zLkFsbCJdfQ.stub";
 
   # Seed data, ldbadd-ed into sam.ldb at provisioning: 250 users (more than
   # one page), vm-team with five users and the nested vm-sub (two more);
@@ -148,7 +148,7 @@ let
                 "provisioningStatus": "Success",
             }],
         }],
-        "managedDevices": [],
+        "managedDevices": [{"id": "00000000-0000-0000-0000-000000000801", "deviceName": "vm-laptop", "operatingSystem": "Windows"}],
         "groups": [],
         # Two pages of two and one, the second answered 429 once.
         "users": [{"@odata.type": "#microsoft.graph.user",
@@ -374,6 +374,19 @@ let
         h.reply(200, CREATED[-1])
 
 
+    def managed_device(h, query, key):
+        for d in SEED["managedDevices"]:
+            if key == d["id"]:
+                return h.reply(200, d)
+        h.error(404, "ResourceNotFound", key)
+
+
+    def accepted(h, query, key):
+        """An Intune device action: accepted, done later on the device."""
+        h.send_response(204)
+        h.end_headers()
+
+
     def none(h, query, key):
         h.reply(200, {"value": []})
 
@@ -411,6 +424,8 @@ let
         ("DELETE", re.compile(r"/v1\.0/users/([^/]+)"), user_delete),
         ("POST", re.compile(r"/v1\.0/users/([^/]+)/assignLicense"), assign_license),
         ("GET", re.compile(r"/v1\.0/directory/deletedItems/([^/]+)"), deleted_item),
+        ("GET", re.compile(r"/v1\.0/deviceManagement/managedDevices/([^/]+)"), managed_device),
+        ("POST", re.compile(r"/v1\.0/deviceManagement/managedDevices/([^/]+)/(?:syncDevice|rebootNow|retire|wipe)"), accepted),
         ("POST", re.compile(r"/v1\.0/directory/deletedItems/([^/]+)/restore"), restore),
         ("GET", re.compile(r"/v1\.0/users/([^/]+)/(?:transitiveMemberOf|ownedObjects)"), none),
         ("GET", re.compile(r"/v1\.0/groups/([^/]+)/members"), group_members),
@@ -539,14 +554,14 @@ let
     # The startup probe: the roles claim decoded, P1 absent from subscribedSkus,
     # Intune present from its read probe. Later issues assert their hidden actions.
     probe = entra["probe"]
-    assert probe["roles"] == ["Organization.Read.All", "User.Read.All", "LicenseAssignment.Read.All", "GroupMember.Read.All", "Device.Read.All", "Application.Read.All", "AuditLog.Read.All", "User.EnableDisableAccount.All", "User.RevokeSessions.All", "RoleManagement.Read.Directory", "User-PasswordProfile.ReadWrite.All", "UserAuthMethod-TAP.ReadWrite.All", "UserAuthenticationMethod.ReadWrite.All", "GroupMember.ReadWrite.All", "User.ReadWrite.All", "User.DeleteRestore.All"], probe
+    assert probe["roles"] == ["Organization.Read.All", "User.Read.All", "LicenseAssignment.Read.All", "GroupMember.Read.All", "Device.Read.All", "Application.Read.All", "AuditLog.Read.All", "User.EnableDisableAccount.All", "User.RevokeSessions.All", "RoleManagement.Read.Directory", "User-PasswordProfile.ReadWrite.All", "UserAuthMethod-TAP.ReadWrite.All", "UserAuthenticationMethod.ReadWrite.All", "GroupMember.ReadWrite.All", "User.ReadWrite.All", "User.DeleteRestore.All", "DeviceManagementManagedDevices.Read.All", "DeviceManagementManagedDevices.PrivilegedOperations.All"], probe
     assert probe["licences"] == {"P1": "absent", "P2": "absent", "Intune": "present"}, probe
     assert "group_reads" not in probe and "notes" not in probe, probe
     assert entra["enabled_groups"] == ["core", "identity", "security", "policy", "devices", "infra"], entra
     assert entra["password_writeback"] == {"value": "off", "source": "operator-declared"}, entra
     hidden = {h["tool"] + " " + h["action"]: h["reason"] for h in entra["hidden_actions"]}
     # The token has no Group.* or Device.* write permission: those entra-objects and entra-delete writes are hidden.
-    assert sorted(hidden) == ["entra_device delete", "entra_device managed_get", "entra_device managed_search",
+    assert sorted(hidden) == ["entra_device delete",
                               "entra_group create", "entra_group delete", "entra_group edit", "entra_group restore",
                               "entra_policy auth_methods_policy", "entra_policy conditional_access", "entra_policy named_locations", "entra_policy security_defaults",
                               "entra_risk risk_detections", "entra_risk risky_users", "entra_role eligibility", "entra_signin search", "entra_user auth_methods", "entra_user registration"], sorted(hidden)
@@ -706,11 +721,11 @@ let
 
     # Writes: the server runs with --capabilities ad-account-state,ad-passwords,ad-group-membership,ad-objects,ad-delete,
     # ad-gpo-links,ad-password-policy,entra-account-state,entra-credentials,entra-group-membership,entra-objects,entra-delete,
-    # entra-licenses.
+    # entra-licenses,intune-device-actions,intune-retire-wipe.
     assert ad["enabled_capabilities"] == ["ad-account-state", "ad-passwords", "ad-group-membership", "ad-objects", "ad-delete",
                                           "ad-gpo-links", "ad-password-policy"], ad
     assert entra["enabled_capabilities"] == ["entra-account-state", "entra-credentials", "entra-group-membership", "entra-objects", "entra-delete",
-                                             "entra-licenses"], entra
+                                             "entra-licenses", "intune-device-actions", "intune-retire-wipe"], entra
     api = next(t for t in listed["result"]["tools"] if t["name"] == "ad_api")
     assert api["inputSchema"]["properties"]["action"]["enum"] == ["search", "modify", "add", "delete", "rename"], api
     user = next(t for t in listed["result"]["tools"] if t["name"] == "ad_user")
@@ -867,6 +882,15 @@ let
     assert [x["skuPartNumber"] for x in lic["assignedLicenses"]] == ["EXCHANGESTANDARD"], lic
     call("entra_user", {"action": "remove_license", "id": synced["id"], "skus": [sku], "reason": "vm-test entra remove"})
     assert call("entra_user", {"action": "licenses", "id": synced["id"]})["assignedLicenses"] == []
+
+    # Intune: a sync is dispatched to the managed device; a wipe whose confirm is not its deviceName sends nothing.
+    md = call("entra_device", {"action": "managed_search"})["results"][0]
+    w = call("entra_device", {"action": "sync", "id": md["id"], "reason": "vm-test intune sync"})
+    print("entra_device sync", json.dumps(w))
+    assert w["endpoint"] == "POST /v1.0/deviceManagement/managedDevices/" + md["id"] + "/syncDevice" and w["name"] == "vm-laptop", w
+    assert "do not repeat" in w["dispatched"], w
+    why = refused("entra_device", {"action": "wipe", "id": md["id"], "confirm": "vm-desktop", "reason": "vm-test intune wipe mismatch"})
+    assert "confirm must be the target's deviceName" in why, why
     print("ok")
   '';
 
@@ -1027,7 +1051,7 @@ pkgs.testers.runNixOSTest {
         logLevel = "debug";
         extraArgs = [
           "--capabilities"
-          "ad-account-state,ad-passwords,ad-group-membership,ad-objects,ad-delete,ad-gpo-links,ad-password-policy,entra-account-state,entra-credentials,entra-group-membership,entra-objects,entra-delete,entra-licenses"
+          "ad-account-state,ad-passwords,ad-group-membership,ad-objects,ad-delete,ad-gpo-links,ad-password-policy,entra-account-state,entra-credentials,entra-group-membership,entra-objects,entra-delete,entra-licenses,intune-device-actions,intune-retire-wipe"
         ];
         http.authTokenFile = "/run/mcp-bearer";
         ad = {
@@ -1131,14 +1155,17 @@ pkgs.testers.runNixOSTest {
         for reason in ("entra assign", "entra remove"):
             assert any(f'reason="vm-test {reason}"' in x and "outcome=ok" in x and "capability=entra-licenses" in x
                        for x in journal.splitlines()), reason
-        for reason in ("entra edit synced", "entra delete mismatch"):
+        assert any('reason="vm-test intune sync"' in x and "outcome=ok" in x and "capability=intune-device-actions" in x
+                   for x in journal.splitlines()), journal
+        for reason in ("entra edit synced", "entra delete mismatch", "intune wipe mismatch"):
             assert any(f'reason="vm-test {reason}"' in x and 'outcome="not sent"' in x for x in journal.splitlines()), reason
 
-    with subtest("the stub recorded the cloud users' writes, and to the synced user only its licences"):
+    with subtest("the stub recorded the cloud users' writes, to the synced user only its licences, and the sync but no wipe"):
         writes = machine.succeed("cat /tmp/stub-writes").splitlines()
         new = "/v1.0/users/00000000-0000-0000-0000-000000000110"
         assert writes == ["PATCH /v1.0/users/entra-user3@example.com", "PATCH /v1.0/users/entra-user2@example.com", "POST /v1.0/users",
                           "PATCH " + new, "DELETE " + new, "POST /v1.0/directory/deletedItems/00000000-0000-0000-0000-000000000110/restore"] + \
-            ["POST /v1.0/users/00000000-0000-0000-0000-000000000109/assignLicense"] * 2, writes
+            ["POST /v1.0/users/00000000-0000-0000-0000-000000000109/assignLicense"] * 2 + \
+            ["POST /v1.0/deviceManagement/managedDevices/00000000-0000-0000-0000-000000000801/syncDevice"], writes
   '';
 }

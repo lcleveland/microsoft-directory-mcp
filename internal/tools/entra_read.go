@@ -431,8 +431,7 @@ func init() {
 				"with OS version, isCompliant, isManaged, onPremisesSyncEnabled and registeredOwners. owners: the device's "+
 				"registered owners. managed_search: Intune managed devices as briefs (id, deviceName, operatingSystem, "+
 				"osVersion, complianceState, lastSyncDateTime, userPrincipalName); filter, not query. managed_get: one "+
-				"Intune managed device by its Intune id, every property (encryption, ownership, serial number and more). "+
-				"Intune is read only here."+counterpartDoc, entraDeviceDoc,
+				"Intune managed device by its Intune id, every property (encryption, ownership, serial number and more)."+counterpartDoc, entraDeviceDoc,
 			entraAction{Action{Name: "search", Perms: deviceRead}, entraSearch(entraDevices)},
 			entraAction{Action{Name: "get", Perms: deviceRead}, func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
 				return d.entraGetJoined(ctx, joinDevice, in)
@@ -441,6 +440,7 @@ func init() {
 			entraAction{Action{Name: "managed_search", Perms: intuneRead, Licence: "Intune"}, entraSearch(entraManaged)},
 			entraAction{Action{Name: "managed_get", Perms: intuneRead, Licence: "Intune"}, entraGet(entraManaged)},
 			entraDelete(entraDevices), entraDeviceState("disable"), entraDeviceState("enable"),
+			intuneAction("sync"), intuneAction("reboot"), intuneAction("retire"), intuneAction("wipe"),
 		),
 		Tool{Name: "entra_api", Group: "core", Actions: []Action{{Name: "get"}, {Name: "post", Capabilities: entraCapabilities()},
 			{Name: "patch", Capabilities: entraCapabilities()}, {Name: "put", Capabilities: entraCapabilities()}, {Name: "delete", Capabilities: entraCapabilities()}},

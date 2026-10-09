@@ -210,6 +210,8 @@ func (d Deps) entraWrite(ctx context.Context, w entraWrite) (map[string]any, err
 			fields = append(fields, "isAssignableToRole")
 		case entraDeleted.path:
 			fields = nil // a deleted object of any type: all of it
+		case entraManaged.path:
+			fields = []string{"id", "deviceName"}
 		}
 		var tgt map[string]any
 		if err := d.Graph.Object(ctx, base, graph.Params{Fields: fields}, &tgt); err != nil {
@@ -217,11 +219,11 @@ func (d Deps) entraWrite(ctx context.Context, w entraWrite) (map[string]any, err
 		}
 		upn, _ := tgt["userPrincipalName"].(string)
 		name, _ := tgt["displayName"].(string)
+		if n, ok := tgt["deviceName"].(string); ok {
+			name = n
+		}
 		if w.confirm && !strings.EqualFold(strings.TrimSpace(w.in.Confirm), cmp.Or(upn, name)) {
-			what := "displayName"
-			if w.kind.path == entraUsers.path {
-				what = "userPrincipalName"
-			}
+			what := cmp.Or(map[string]string{entraUsers.path: "userPrincipalName", entraManaged.path: "deviceName"}[w.kind.path], "displayName")
 			return nil, fmt.Errorf("confirm must be the target's %s: %v is %q. Check it is the object you mean, then retry", what, tgt["id"], cmp.Or(upn, name))
 		}
 		if w.typ != "" && tgt["@odata.type"] != w.typ {
@@ -560,6 +562,35 @@ func entraDeviceState(action string) entraAction {
 		}}
 }
 
+// intuneAction is entra_device sync or reboot (intune-device-actions), or
+// retire or wipe (intune-retire-wipe) with confirm: one POST to an Intune
+// managed device, with no options. Intune
+// accepts the action and the device carries it out later, so the reply
+// says it was dispatched, not done.
+// ponytail: Perms is any-of, so the action shows with PrivilegedOperations.All
+// alone; the pre-read then fails closed (403) without a managedDevices read.
+func intuneAction(action string) entraAction {
+	op := map[string]string{"sync": "syncDevice", "reboot": "rebootNow", "retire": "retire", "wipe": "wipe"}[action]
+	capability, confirm := "intune-device-actions", false
+	if action == "retire" || action == "wipe" {
+		capability, confirm = "intune-retire-wipe", true
+	}
+	return entraAction{Action{Name: action, Perms: []string{"DeviceManagementManagedDevices.PrivilegedOperations.All"}, Licence: "Intune", Capabilities: []string{capability}},
+		func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
+			w := entraWrite{tool: "entra_device", action: action, kind: entraManaged, id: in.ID, in: in.writeIn, confirm: confirm,
+				method: http.MethodPost, rels: []string{"/" + op}}
+			if action == "wipe" {
+				w.body = map[string]any{} // Graph's defaults: no keepEnrollmentData and the like
+			}
+			out, err := d.entraWrite(ctx, w)
+			if err != nil {
+				return nil, err
+			}
+			out["dispatched"] = "Intune accepted the action; the device carries it out at its next check-in. Check managed_get, and do not repeat the call"
+			return out, nil
+		}}
+}
+
 // entraRiskAction is entra_risk dismiss or confirm_compromised
 // (entra-risk): one risky user, by object id. Allowed on synced users.
 func entraRiskAction(action string) entraAction {
@@ -798,11 +829,25 @@ func entraDeviceDoc(visible []string) string {
 	if slices.Contains(visible, "delete") {
 		says = append(says, "delete deletes it, with confirm (its displayName); a deleted device can't be restored, and a synced one names ad_object delete (entra-delete)")
 	}
-	if len(says) == 0 {
-		return ""
+	doc := ""
+	if len(says) > 0 {
+		doc = "\n\nWrites, one Entra device by object id, with a reason for the audit log: " + strings.Join(says, "; ") +
+			". A device synced from the forest is refused and names the ad_* action and AD counterpart."
 	}
-	return "\n\nWrites, one device by object id, with a reason for the audit log: " + strings.Join(says, "; ") +
-		". A device synced from the forest is refused and names the ad_* action and AD counterpart."
+	var intune []string
+	if slices.Contains(visible, "sync") {
+		intune = append(intune, "sync makes it check in with Intune now, reboot restarts it (intune-device-actions)")
+	}
+	if slices.Contains(visible, "retire") {
+		intune = append(intune, "retire removes company data and management, wipe resets it to factory settings with Graph's defaults; "+
+			"each needs confirm, its deviceName (intune-retire-wipe)")
+	}
+	if len(intune) > 0 {
+		doc += "\n\nIntune actions, one managed device by its Intune id (from managed_search), with a reason for the audit log: " +
+			strings.Join(intune, "; ") + ". An action is dispatched, not done: the reply says Intune accepted it and the device acts " +
+			"at its next check-in. Never repeat a call because the action has not shown yet; nothing is retried."
+	}
+	return doc
 }
 
 // entraRiskDoc describes the entra_risk writes when they show.
