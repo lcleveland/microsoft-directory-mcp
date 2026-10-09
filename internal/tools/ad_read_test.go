@@ -2,10 +2,12 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
 
+	"github.com/go-ldap/ldap/v3"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/lcleveland/microsoft-directory-mcp/internal/ad"
@@ -114,5 +116,38 @@ func TestOffsetCursor(t *testing.T) {
 	}
 	if encodeOffset(-1, "x") != "" {
 		t.Error("end of members: want no cursor")
+	}
+}
+
+// Multi-valued keys are capped; a count AD may have cut short is a floor.
+func TestCapValues(t *testing.T) {
+	vals := func(n int) []string {
+		var out []string
+		for i := range n {
+			out = append(out, fmt.Sprintf("CN=u%d,DC=corp,DC=example,DC=com", i))
+		}
+		return out
+	}
+	for _, c := range []struct {
+		attr string
+		n    int
+		want string
+	}{
+		{"member", 150, "map[of:150 returned:100]"},
+		{"member;range=0-*", 150, "map[of:150 returned:100]"},
+		{"member;range=0-1499", 1500, "map[of_at_least:1500 returned:100]"},
+	} {
+		e := ldap.NewEntry("CN=g,DC=corp,DC=example,DC=com", map[string][]string{c.attr: vals(c.n), "objectClass": {"top", "group"}})
+		out := capValues(ad.Decode(e, nil), heldBack(e))
+		trunc, _ := out["_truncation"].(map[string]any)
+		if got := fmt.Sprint(trunc["member"]); got != c.want || len(out["member"].([]any)) != dnCap || len(trunc) != 1 {
+			t.Errorf("%s: _truncation %v, %d members", c.attr, out["_truncation"], len(out["member"].([]any)))
+		}
+	}
+	// A list entry can't tell, so its count is always a floor.
+	e := ldap.NewEntry("CN=g,DC=corp,DC=example,DC=com", map[string][]string{"member": vals(101)})
+	out := listCap(func(m map[string]any) map[string]any { return m })(ad.Decode(e, nil))
+	if got := fmt.Sprint(out["_truncation"]); got != "map[member:map[of_at_least:101 returned:100]]" {
+		t.Errorf("list: %s", got)
 	}
 }

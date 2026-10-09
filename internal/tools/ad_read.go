@@ -63,8 +63,49 @@ var (
 		brief: []string{"dn", "name", "objectClass", "sAMAccountName", "lastKnownParent", "objectSid", "objectGUID", "whenChanged"}}
 )
 
-// dnCap caps each multi-valued attribute of a get.
+// dnCap caps each multi-valued attribute of a get or list entry.
 const dnCap = 100
+
+// capValues cuts each multi-valued key of out to dnCap, noting it in
+// _truncation. AD hands back one range of a big attribute (1500 values by
+// default), so where more(key) says it held some back, the count read is
+// reported as of_at_least instead of of.
+func capValues(out map[string]any, more func(key string) bool) map[string]any {
+	trunc := map[string]any{}
+	for key, v := range out {
+		if l, ok := v.([]any); ok && len(l) > dnCap {
+			of := "of"
+			if more(key) {
+				of = "of_at_least"
+			}
+			out[key] = l[:dnCap]
+			trunc[key] = map[string]int{"returned": dnCap, of: len(l)}
+		}
+	}
+	if len(trunc) > 0 {
+		out["_truncation"] = trunc
+	}
+	return out
+}
+
+// heldBack reports whether AD returned only a first range of key in e: a
+// range not ending in * is a slice, not the whole attribute.
+func heldBack(e *ldap.Entry) func(key string) bool {
+	return func(key string) bool {
+		return slices.ContainsFunc(e.Attributes, func(a *ldap.EntryAttribute) bool {
+			name, rng, ok := strings.Cut(a.Name, ";range=")
+			return ok && strings.EqualFold(name, key) && !strings.HasSuffix(rng, "-*")
+		})
+	}
+}
+
+// listCap caps the multi-valued keys of a list entry.
+// ponytail: a list can't see AD's range marker after Decode, so every count is a floor; get has the exact one.
+func listCap(shape func(map[string]any) map[string]any) func(map[string]any) map[string]any {
+	return func(m map[string]any) map[string]any {
+		return capValues(shape(m), func(string) bool { return true })
+	}
+}
 
 // attrs maps keys to the LDAP attributes to request.
 func attrs(keys []string) []string {
@@ -157,7 +198,7 @@ func (in adIn) keys(def []string) []string {
 
 type adGroupIn struct {
 	adIn
-	Transitive   bool     `json:"transitive,omitempty" jsonschema:"members: every nested member, not only direct ones"`
+	Transitive   bool     `json:"transitive,omitempty" jsonschema:"members: nested members too, as each domain's DCs see the nesting; one nested through a group of another domain can be missed"`
 	Members      []string `json:"members,omitempty" jsonschema:"writes, add_members, remove_members: up to 20 members by id (a DN, SID, GUID, UPN, sAMAccountName or DOMAIN\\sam)"`
 	GroupScope   string   `json:"group_scope,omitempty" jsonschema:"writes, create: global (the default), domain_local or universal"`
 	Distribution bool     `json:"distribution,omitempty" jsonschema:"writes, create: a distribution group, not a security group"`
@@ -175,7 +216,7 @@ func (d Deps) search(ctx context.Context, k adKind, in adIn, q ad.Query) (map[st
 	}
 	keys := in.keys(k.brief)
 	q.Domain, q.Filter, q.Attrs = in.Domain, f, attrs(keys)
-	q.Shape = k.shape(keys)
+	q.Shape = listCap(k.shape(keys))
 	p, err := d.AD.Search(ctx, q, in.Cursor)
 	if err != nil {
 		return nil, err
@@ -193,17 +234,7 @@ func (d Deps) get(ctx context.Context, k adKind, in adIn) (map[string]any, error
 	if err != nil {
 		return nil, err
 	}
-	out := k.shape(keys)(ad.Decode(e, attrs(keys)))
-	trunc := map[string]any{}
-	for key, v := range out {
-		if l, ok := v.([]any); ok && len(l) > dnCap {
-			out[key] = l[:dnCap]
-			trunc[key] = map[string]int{"returned": dnCap, "of": len(l)}
-		}
-	}
-	if len(trunc) > 0 {
-		out["_truncation"] = trunc
-	}
+	out := capValues(k.shape(keys)(ad.Decode(e, attrs(keys))), heldBack(e))
 	// ponytail: memberCount reads every member, 1500 a round trip; fine to tens of thousands.
 	if slices.ContainsFunc(keys, func(k string) bool { return strings.EqualFold(k, "memberCount") }) {
 		n := 0
@@ -242,7 +273,7 @@ func (d Deps) members(ctx context.Context, in adGroupIn) (map[string]any, error)
 		all = append(all, k.brief...)
 	}
 	keys := in.keys(append(all, "objectClass"))
-	shape := func(m map[string]any) map[string]any {
+	shape := listCap(func(m map[string]any) map[string]any {
 		if len(in.Fields) > 0 {
 			return project(m, keys)
 		}
@@ -260,7 +291,7 @@ func (d Deps) members(ctx context.Context, in adGroupIn) (map[string]any, error)
 			k = []string{"name", "sAMAccountName", "objectSid"}
 		}
 		return project(m, append(k, "objectClass"))
-	}
+	})
 	if in.Transitive {
 		f := "(memberOf:1.2.840.113556.1.4.1941:=" + ldap.EscapeFilter(dn) + ")"
 		p, err := d.AD.Search(ctx, ad.Query{Domain: in.Domain, Filter: f, Attrs: attrs(keys), Shape: shape}, in.Cursor)
@@ -381,6 +412,7 @@ func adCapabilities() []string {
 const adSearchDoc = "Lists search every domain of the forest (domain narrows to one), page 200 at a time with next_cursor " +
 	"(expires after 10 idle minutes), and are unsorted; a domain that can't be reached is listed in _skipped. " +
 	"Keys are LDAP attribute names; values are decoded (SIDs, GUIDs, times as RFC 3339 UTC, null for never). " +
+	"A multi-valued attribute keeps its first 100 values, with returned and of (or of_at_least) under _truncation. " +
 	"filter takes a raw LDAP filter: read the ad://guide/ldap-filter resource first."
 
 // createAction is the create action of the AD tool for class.
@@ -545,7 +577,7 @@ func init() {
 					Description: "Groups of the forest. search: list groups as briefs (dn, sAMAccountName, displayName, " +
 						"groupType scope and type, description, objectSid). get: one group by id, with managedBy, memberCount, " +
 						"memberOf (first 100) and adminCount, but not its members. members: the group's members as briefs " +
-						"of their own kind, 200 a page; transitive=true lists every nested member instead (each once)." + counterpartDoc + "\n\n" + adSearchDoc + desc},
+						"of their own kind, 200 a page; transitive=true lists nested members too (each once), found per domain by its own DCs, so a member nested through a group of another domain can be missed: walk such groups' direct members to be sure." + counterpartDoc + "\n\n" + adSearchDoc + desc},
 					visible, func(ctx context.Context, _ *mcp.CallToolRequest, in adGroupIn) (*mcp.CallToolResult, map[string]any, error) {
 						var (
 							out map[string]any
