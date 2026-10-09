@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -230,5 +231,52 @@ func TestWriteOn429NotRetried(t *testing.T) {
 	}
 	if calls != 1 || len(*waits) != 0 || body != `{"accountEnabled":false}` || ctype != "application/json" {
 		t.Errorf("calls %d waits %v body %q type %q", calls, *waits, body, ctype)
+	}
+}
+
+func TestObjectSelectsExpandsAndCounts(t *testing.T) {
+	var seen []string
+	c, _ := graphStub(t, func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Header.Get("ConsistencyLevel")+" "+r.URL.Path+" "+r.URL.Query().Get("$select")+" "+r.URL.Query().Get("$expand"))
+		io.WriteString(w, `{"id":"1","@odata.count":7}`)
+	})
+	var m map[string]any
+	p := Params{Fields: []string{"id", "mail"}, Expand: "manager($select=id)"}
+	if err := c.Object(context.Background(), "/v1.0/users/a@example.com", p, &m); err != nil || m["id"] != "1" {
+		t.Fatalf("%v %v", m, err)
+	}
+	var n struct {
+		Count int `json:"@odata.count"`
+	}
+	if err := c.Object(context.Background(), "/v1.0/groups/g/members?$count=true&$top=1", Params{Fields: []string{"id"}}, &n); err != nil || n.Count != 7 {
+		t.Fatalf("%v %v", n, err)
+	}
+	want := []string{" /v1.0/users/a@example.com id,mail manager($select=id)", "eventual /v1.0/groups/g/members id "}
+	if !slices.Equal(seen, want) {
+		t.Errorf("requests %q, want %q", seen, want)
+	}
+}
+
+func TestFetchObjectOrCollection(t *testing.T) {
+	c, _ := graphStub(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/beta/users":
+			io.WriteString(w, `{"value":[{"id":"1"}]}`)
+		case "/v1.0/users/$count":
+			io.WriteString(w, `3`)
+		default:
+			io.WriteString(w, `{"id":"org","value":"not a list"}`)
+		}
+	})
+	page, obj, err := c.Fetch(context.Background(), "/beta/users", Params{}, "")
+	if err != nil || obj != nil || len(page.Results) != 1 {
+		t.Errorf("collection: %+v %v %v", page, obj, err)
+	}
+	page, obj, err = c.Fetch(context.Background(), "/v1.0/organization/x", Params{}, "")
+	if m, _ := obj.(map[string]any); err != nil || page != nil || m["id"] != "org" {
+		t.Errorf("object: %+v %v %v", page, obj, err)
+	}
+	if _, obj, err = c.Fetch(context.Background(), "/v1.0/users/$count", Params{}, ""); err != nil || obj != float64(3) {
+		t.Errorf("count: %v %v", obj, err)
 	}
 }

@@ -23,6 +23,7 @@ type Params struct {
 	Query  string   `json:"query,omitempty"`  // $search on displayName and mail
 	Sort   string   `json:"sort,omitempty"`   // $orderby
 	Fields []string `json:"fields,omitempty"` // $select
+	Expand string   `json:"-"`                // $expand, fixed by the action
 }
 
 var (
@@ -36,7 +37,7 @@ var (
 // $orderby need the header and $count=true; $search needs only the header.
 func (p Params) encode() (url.Values, bool) {
 	q := url.Values{}
-	for k, v := range map[string]string{"$filter": p.Filter, "$orderby": p.Sort, "$select": strings.Join(p.Fields, ",")} {
+	for k, v := range map[string]string{"$filter": p.Filter, "$orderby": p.Sort, "$select": strings.Join(p.Fields, ","), "$expand": p.Expand} {
 		if v != "" {
 			q.Set(k, v)
 		}
@@ -50,6 +51,31 @@ func (p Params) encode() (url.Values, bool) {
 		q.Set("$count", "true")
 	}
 	return q, advanced || p.Query != ""
+}
+
+// url appends p's query to path, and says whether ConsistencyLevel:
+// eventual goes with it: when p needs it, or path counts.
+func (p Params) url(path string) (string, bool) {
+	q, eventual := p.encode()
+	if len(q) > 0 {
+		sep := "?"
+		if strings.Contains(path, "?") {
+			sep = "&"
+		}
+		// Encode writes spaces as +; OData wants %20.
+		path += sep + strings.ReplaceAll(q.Encode(), "+", "%20")
+	}
+	return path, eventual || strings.Contains(path, "$count")
+}
+
+// Object GETs the object at path with p's $select and $expand into out.
+func (c *Client) Object(ctx context.Context, path string, p Params, out any) error {
+	u, eventual := p.url(c.graphURL + path)
+	b, err := c.send(ctx, http.MethodGet, u, eventual, nil)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(b, out)
 }
 
 // Page is one page of a list, shaped like an AD search page.
@@ -111,36 +137,38 @@ func (c *Client) decodeCursor(s, key string) (cursor, error) {
 // that is returned in parts, its URL re-fetched for each.
 // ponytail: re-fetches an over-large Graph page per part; pass $top in path where the API allows it.
 func (c *Client) List(ctx context.Context, path string, p Params, cursorIn string) (*Page, error) {
+	page, _, err := c.Fetch(ctx, path, p, cursorIn)
+	return page, err
+}
+
+// Fetch is List for a path that may not be a collection: a reply without a
+// value array of objects comes back whole as obj, with page nil.
+func (c *Client) Fetch(ctx context.Context, path string, p Params, cursorIn string) (page *Page, obj any, err error) {
 	key := listKey(path, p)
-	cur := cursor{Key: key, URL: c.graphURL + path}
+	cur := cursor{Key: key}
 	if cursorIn != "" {
-		var err error
 		if cur, err = c.decodeCursor(cursorIn, key); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-	} else if q, eventual := p.encode(); len(q) > 0 {
-		sep := "?"
-		if strings.Contains(path, "?") {
-			sep = "&"
-		}
-		// Encode writes spaces as +; OData wants %20.
-		cur.URL += sep + strings.ReplaceAll(q.Encode(), "+", "%20")
-		cur.Eventual = eventual
+	} else {
+		cur.URL, cur.Eventual = p.url(c.graphURL + path)
 	}
 	b, err := c.send(ctx, http.MethodGet, cur.URL, cur.Eventual, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var body struct {
-		Value    []map[string]any `json:"value"`
-		NextLink string           `json:"@odata.nextLink"`
+		Value    json.RawMessage `json:"value"`
+		NextLink string          `json:"@odata.nextLink"`
 	}
-	if err := json.Unmarshal(b, &body); err != nil {
-		return nil, err
+	var items []map[string]any
+	if json.Unmarshal(b, &body) != nil || json.Unmarshal(body.Value, &items) != nil || items == nil {
+		err = json.Unmarshal(b, &obj)
+		return nil, obj, err
 	}
-	rest := body.Value[min(cur.Skip, len(body.Value)):]
+	rest := items[min(cur.Skip, len(items)):]
 	kept, trunc := paging.Trim(rest[:min(len(rest), paging.Size)])
-	page := &Page{Results: append([]map[string]any{}, rest[:kept]...), Truncation: trunc}
+	page = &Page{Results: append([]map[string]any{}, rest[:kept]...), Truncation: trunc}
 	switch {
 	case kept < len(rest):
 		cur.Skip += kept
@@ -149,5 +177,5 @@ func (c *Client) List(ctx context.Context, path string, p Params, cursorIn strin
 		cur.URL, cur.Skip = body.NextLink, 0
 		page.NextCursor = c.encodeCursor(cur)
 	}
-	return page, nil
+	return page, nil, nil
 }

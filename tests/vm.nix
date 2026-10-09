@@ -7,7 +7,9 @@
 #                            verifies the client assertion and issues a JWT
 #                            with a roles claim; /organization, and the probe's
 #                            subscribedSkus (no P1), managedDevices and signIns (403);
-#                            /users in two nextLink pages, the second 429 once
+#                            /users in two nextLink pages, the second 429 once;
+#                            a user by id or UPN, a group's members, /devices
+#                            and /beta/organization
 #   microsoft-directory-mcp  the module's HTTP service
 #
 # One full MCP session calls ad_status (a simple bind over LDAPS, trusting
@@ -35,8 +37,8 @@ let
   # The certificate half of the Entra fixture, readable by the stub.
   certPublic = "/run/entra-cert-public.pem";
   # An unsigned JWT the server decodes for the startup probe. Payload:
-  # {"aud":"https://graph.microsoft.com","roles":["Organization.Read.All","User.Read.All","LicenseAssignment.Read.All"]}
-  accessToken = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJhdWQiOiJodHRwczovL2dyYXBoLm1pY3Jvc29mdC5jb20iLCJyb2xlcyI6WyJPcmdhbml6YXRpb24uUmVhZC5BbGwiLCJVc2VyLlJlYWQuQWxsIiwiTGljZW5zZUFzc2lnbm1lbnQuUmVhZC5BbGwiXX0.stub";
+  # {"aud":"https://graph.microsoft.com","roles":["Organization.Read.All","User.Read.All","LicenseAssignment.Read.All","GroupMember.Read.All","Device.Read.All"]}
+  accessToken = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJhdWQiOiJodHRwczovL2dyYXBoLm1pY3Jvc29mdC5jb20iLCJyb2xlcyI6WyJPcmdhbml6YXRpb24uUmVhZC5BbGwiLCJVc2VyLlJlYWQuQWxsIiwiTGljZW5zZUFzc2lnbm1lbnQuUmVhZC5BbGwiLCJHcm91cE1lbWJlci5SZWFkLkFsbCIsIkRldmljZS5SZWFkLkFsbCJdfQ.stub";
 
   # Seed data, ldbadd-ed into sam.ldb at provisioning: 250 users (more than
   # one page), vm-team with five users and the nested vm-sub (two more);
@@ -94,10 +96,12 @@ let
   # Routes are (method, path) -> handler; later issues add to ROUTES and SEED.
   stub = pkgs.writers.writePython3Bin "stub-graph" { flakeIgnore = [ "E501" ]; } ''
     import base64
+    import functools
     import hashlib
     import http.server
     import json
     import os
+    import re
     import ssl
     import subprocess
     import tempfile
@@ -122,6 +126,7 @@ let
         }],
         # Exchange only: no P1 (AAD_PREMIUM) and no P2.
         "subscribedSkus": [{
+            "skuId": "00000000-0000-0000-0000-0000000000c1",
             "skuPartNumber": "EXCHANGESTANDARD",
             "capabilityStatus": "Enabled",
             "servicePlans": [{
@@ -132,10 +137,19 @@ let
         }],
         "managedDevices": [],
         # Two pages of two and one, the second answered 429 once.
-        "users": [{"id": "00000000-0000-0000-0000-00000000010%d" % n,
+        "users": [{"@odata.type": "#microsoft.graph.user",
+                   "id": "00000000-0000-0000-0000-00000000010%d" % n,
                    "displayName": "Entra User %d" % n,
-                   "userPrincipalName": "entra-user%d@example.com" % n} for n in (1, 2, 3)],
+                   "userPrincipalName": "entra-user%d@example.com" % n,
+                   "accountEnabled": True,
+                   "assignedLicenses": [{"skuId": "00000000-0000-0000-0000-0000000000c1"}]} for n in (1, 2, 3)],
+        "devices": [{"@odata.type": "#microsoft.graph.device",
+                     "id": "00000000-0000-0000-0000-000000000201",
+                     "deviceId": "00000000-0000-0000-0000-000000000301",
+                     "displayName": "entra-device1", "operatingSystem": "Windows"}],
     }
+    # A group of user 1 and the device.
+    SEED["members"] = {"00000000-0000-0000-0000-000000000401": [SEED["users"][0], SEED["devices"][0]]}
     THROTTLED = set()
 
 
@@ -215,6 +229,19 @@ let
         h.reply(200, {"value": SEED["users"][2:]})
 
 
+    def user(h, query, key):
+        for u in SEED["users"]:
+            if urllib.parse.unquote(key) in (u["id"], u["userPrincipalName"]):
+                return h.reply(200, u)
+        h.error(404, "Request_ResourceNotFound", key)
+
+
+    def group_members(h, query, key):
+        if key not in SEED["members"]:
+            return h.error(404, "Request_ResourceNotFound", key)
+        h.reply(200, {"value": SEED["members"][key]})
+
+
     def no_premium(h, query):
         h.error(403, "Authentication_RequestFromNonPremiumTenantOrB2CTenant",
                 "Neither tenant is B2C or tenant doesn't have premium license")
@@ -227,7 +254,14 @@ let
         ("GET", "/v1.0/deviceManagement/managedDevices"): listing("managedDevices"),
         ("GET", "/v1.0/auditLogs/signIns"): no_premium,
         ("GET", "/v1.0/users"): users,
+        ("GET", "/v1.0/devices"): listing("devices"),
+        ("GET", "/beta/organization"): organization,
     }
+    # (method, path pattern) -> handler(h, query, the pattern's group).
+    PATTERNS = [
+        ("GET", re.compile(r"/v1\.0/users/([^/]+)"), user),
+        ("GET", re.compile(r"/v1\.0/groups/([^/]+)/members"), group_members),
+    ]
     UNAUTHENTICATED = {TOKEN_PATH}
 
 
@@ -257,6 +291,10 @@ let
                 record("bearers", bearer)
                 if bearer != "Bearer " + ACCESS_TOKEN:
                     return self.error(401, "InvalidAuthenticationToken", "bad bearer")
+            for method, pattern, handler in PATTERNS:
+                m = pattern.fullmatch(url.path)
+                if route is None and method == self.command and m:
+                    route = functools.partial(handler, key=m.group(1))
             if route is None:
                 return self.error(404, "Request_ResourceNotFound", url.path)
             route(self, urllib.parse.parse_qs(url.query))
@@ -316,7 +354,8 @@ let
 
     _, listed = post({"jsonrpc": "2.0", "id": next(ids), "method": "tools/list"}, session)
     tools = sorted(t["name"] for t in listed["result"]["tools"])
-    assert tools == ["ad_api", "ad_computer", "ad_gpo", "ad_group", "ad_object", "ad_ou", "ad_policy", "ad_status", "ad_topology", "ad_user", "entra_status"], tools
+    assert tools == ["ad_api", "ad_computer", "ad_gpo", "ad_group", "ad_object", "ad_ou", "ad_policy", "ad_status", "ad_topology", "ad_user",
+                     "entra_api", "entra_device", "entra_group", "entra_status", "entra_user"], tools
 
     ad = call("ad_status", {})
     print("ad_status", json.dumps(ad))
@@ -336,11 +375,13 @@ let
     # The startup probe: the roles claim decoded, P1 absent from subscribedSkus,
     # Intune present from its read probe. Later issues assert their hidden actions.
     probe = entra["probe"]
-    assert probe["roles"] == ["Organization.Read.All", "User.Read.All", "LicenseAssignment.Read.All"], probe
+    assert probe["roles"] == ["Organization.Read.All", "User.Read.All", "LicenseAssignment.Read.All", "GroupMember.Read.All", "Device.Read.All"], probe
     assert probe["licences"] == {"P1": "absent", "P2": "absent", "Intune": "present"}, probe
     assert "group_reads" not in probe and "notes" not in probe, probe
     assert entra["enabled_groups"] == ["core", "identity", "security", "policy", "devices", "infra"], entra
     assert entra["password_writeback"] == {"value": "unknown", "source": "operator-declared"}, entra
+    hidden = sorted(h["tool"] + " " + h["action"] for h in entra["hidden_actions"])
+    assert hidden == ["entra_device managed_get", "entra_device managed_search", "entra_user auth_methods", "entra_user registration"], hidden
     assert ad["probe"]["bound"], ad
     assert {"dns": "corp.example.com", "netbios": "CORP", "dn": "DC=corp,DC=example,DC=com"} in ad["probe"]["domains"], ad
     assert ad["probe"]["reads"] == {"pso-read": "ok"}, ad["probe"]
@@ -441,6 +482,25 @@ let
     assert [r["dc"] for r in repl["results"]] == ["${dcHost}:636"] and repl["results"][0]["inbound"] == [], repl
     assert call("ad_topology", {"action": "trusts"})["results"] == []
     assert call("ad_topology", {"action": "subnets"})["results"] == []
+
+    # Entra reads. A search across the stub's two pages, the second throttled once.
+    first = call("entra_user", {"action": "search"})
+    rest = call("entra_user", {"action": "search", "cursor": first["next_cursor"]})
+    assert [u["displayName"] for u in first["results"] + rest["results"]] == ["Entra User 1", "Entra User 2", "Entra User 3"], (first, rest)
+    assert "next_cursor" not in rest, rest
+    eu = call("entra_user", {"action": "get", "id": "entra-user2@example.com"})
+    print("entra_user get", json.dumps(eu))
+    assert eu["id"] == "00000000-0000-0000-0000-000000000102", eu
+    assert eu["assignedLicenses"] == [{"skuId": "00000000-0000-0000-0000-0000000000c1", "skuPartNumber": "EXCHANGESTANDARD"}], eu
+    assert "signInActivity" in eu["_omitted"], eu
+    members = call("entra_group", {"action": "members", "id": "00000000-0000-0000-0000-000000000401"})["results"]
+    assert [(m["@odata.type"], m.get("userPrincipalName"), m.get("deviceId")) for m in members] == [
+        ("#microsoft.graph.user", "entra-user1@example.com", None),
+        ("#microsoft.graph.device", None, "00000000-0000-0000-0000-000000000301")], members
+    assert call("entra_device", {"action": "search"})["results"][0]["displayName"] == "entra-device1"
+    beta = call("entra_api", {"action": "get", "path": "/beta/organization"})
+    assert beta["results"][0]["displayName"] == "Example Org" and "beta" in beta["_unstable"], beta
+    assert "_unstable" not in call("entra_api", {"action": "get", "path": "/v1.0/organization"})
     print("ok")
   '';
 
@@ -607,6 +667,9 @@ pkgs.testers.runNixOSTest {
         machine.succeed("grep -qxF ${clientId} /tmp/stub-verified")
         machine.fail("test -e /tmp/stub-rejected")
         machine.succeed("grep -qxF 'Bearer ${accessToken}' /tmp/stub-bearers")
+
+    with subtest("the Entra user search waited out the stub's 429"):
+        machine.succeed("grep -q /v1.0/users /tmp/stub-throttled")
 
     with subtest("/healthz answers without the bearer"):
         machine.succeed("curl -fsS http://127.0.0.1:${toString mcpPort}/healthz")
