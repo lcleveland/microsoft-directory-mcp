@@ -55,7 +55,10 @@ func (c *Client) Modify(ctx context.Context, dn, class string, attrs []string, v
 		e := res.Entries[0]
 		// A domain head is a critical system object, yet its GPO links are
 		// written (ad-gpo-links): a modify of gPLink or gPOptions alone.
-		why := protected(e)
+		why, err := c.guard(ctx, d, conn, e)
+		if err != nil {
+			return fmt.Errorf("%s: can't check it isn't a protected target: %w", dn, err)
+		}
 		head := why == "isCriticalSystemObject" && slices.ContainsFunc(e.GetAttributeValues("objectClass"),
 			func(c string) bool { return strings.EqualFold(c, "domainDNS") })
 		if why != "" && !head {
@@ -190,11 +193,129 @@ func rid(sid []byte) (uint32, bool) {
 // target, or "" when it is not: for the other objects a write names, such
 // as the members a membership write adds or removes.
 func (c *Client) Protected(ctx context.Context, dn string) (string, error) {
-	_, _, e, err := c.preRead(ctx, dn)
+	d, conn, e, err := c.preRead(ctx, dn)
 	if err != nil {
 		return "", err
 	}
-	return protected(e), nil
+	return c.guard(ctx, d, conn, e)
+}
+
+// guard is protected plus the protected groups e's tokenGroups can't show
+// or that have no fixed RID: DnsAdmins of e's domain; the forest root
+// domain's BUILTIN protected groups and DnsAdmins, which a principal of
+// another domain can be put in (another domain's domain-local groups
+// aren't in tokenGroups); and the --protected-groups. conn is to a DC of
+// d, e's domain. An error means membership couldn't be read, and the
+// caller refuses: it fails closed.
+func (c *Client) guard(ctx context.Context, d Domain, conn Conn, e *ldap.Entry) (string, error) {
+	if why := protected(e); why != "" {
+		return why, nil
+	}
+	const dnsAdmins = "(sAMAccountName=DnsAdmins)"
+	terms := map[string]string{d.DN: dnsAdmins} // domain DN to the filters of its protected groups
+	doms := map[string]Domain{d.DN: d}
+	root, err := c.Lookup(ctx, c.cfg.Forest)
+	if err != nil {
+		return "", err
+	}
+	if root.DN != d.DN {
+		doms[root.DN] = root
+		terms[root.DN] += dnsAdmins
+		for _, r := range builtinProtected {
+			terms[root.DN] += sidFilter(fmt.Sprintf("S-1-5-32-%d", r))
+		}
+	}
+	for _, id := range c.cfg.ProtectedGroups {
+		dn, err := c.Resolve(ctx, id, "(objectClass=group)")
+		if err != nil {
+			return "", fmt.Errorf("--protected-groups %s: %w", id, err)
+		}
+		x, err := c.DomainOf(ctx, dn)
+		if err != nil {
+			return "", fmt.Errorf("--protected-groups %s: %w", id, err)
+		}
+		doms[x.DN] = x
+		terms[x.DN] += "(distinguishedName=" + ldap.EscapeFilter(dn) + ")"
+	}
+	var mine []string // e and its groups by DN, for the searches in other domains
+	for _, x := range doms {
+		xc := conn
+		if x.DN != d.DN {
+			if xc, _, err = c.Conn(ctx, x); err != nil {
+				return "", err
+			}
+		}
+		res, err := xc.Search(ldap.NewSearchRequest(x.DN, ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false,
+			"(&(objectClass=group)(|"+terms[x.DN]+"))", []string{"objectSid"}, nil))
+		if err != nil {
+			return "", err
+		}
+		if x.DN == d.DN {
+			// tokenGroups holds the domain-local groups of e's own domain too.
+			self := e.GetRawAttributeValue("objectSid")
+			for _, g := range res.Entries {
+				s := g.GetRawAttributeValue("objectSid")
+				if slices.Equal(s, self) || slices.ContainsFunc(e.GetRawAttributeValues("tokenGroups"), func(t []byte) bool { return slices.Equal(t, s) }) {
+					return "a member, direct or nested, of the protected group " + g.DN, nil
+				}
+			}
+			continue
+		}
+		if len(res.Entries) == 0 {
+			continue
+		}
+		if mine == nil {
+			if mine, err = c.groupDNs(ctx, e); err != nil {
+				return "", err
+			}
+		}
+		// A group of x that holds e or one of its groups, and is, or is in, a protected group.
+		f := "(&(objectClass=group)(|"
+		for _, m := range mine {
+			f += "(member=" + ldap.EscapeFilter(m) + ")"
+		}
+		f += ")(|"
+		for _, g := range res.Entries {
+			f += "(distinguishedName=" + ldap.EscapeFilter(g.DN) + ")(memberOf:1.2.840.113556.1.4.1941:=" + ldap.EscapeFilter(g.DN) + ")"
+		}
+		hits, err := searchDNs(xc, x.DN, f+"))")
+		if err != nil {
+			return "", err
+		}
+		if len(hits) > 0 {
+			return "a member, direct or nested, of a protected group of " + x.DNS + " (through " + hits[0] + ")", nil
+		}
+	}
+	return "", nil
+}
+
+// groupDNs is e's DN and those of its tokenGroups, found on the GC. The
+// BUILTIN groups of its domain (S-1-5-32-…) are left out: no other
+// domain's group can hold them.
+func (c *Client) groupDNs(ctx context.Context, e *ldap.Entry) ([]string, error) {
+	out := []string{e.DN}
+	f := ""
+	for _, t := range e.GetRawAttributeValues("tokenGroups") {
+		if !strings.HasPrefix(SIDString(t), "S-1-5-32-") {
+			f += "(objectSid=" + escapeBytes(t) + ")"
+		}
+	}
+	if f == "" {
+		return out, nil
+	}
+	gc, _, err := c.GC(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("global catalog: %w", err)
+	}
+	res, err := gc.Search(ldap.NewSearchRequest("", ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false,
+		"(|"+f+")", []string{"1.1"}, nil))
+	if err != nil {
+		return nil, err
+	}
+	for _, g := range res.Entries {
+		out = append(out, g.DN)
+	}
+	return out, nil
 }
 
 // preRead reads dn's preRead attributes from a DC of its domain.
@@ -221,17 +342,19 @@ func (c *Client) preRead(ctx context.Context, dn string) (Domain, Conn, *ldap.En
 // reaches a protected target, or "" when none does: it is one, or it is a
 // group with one among its members, direct or nested. A member counts when
 // it has adminCount, is a critical system object (every built-in principal
-// is) or a domain controller, or is in a protected group of the domain,
-// which also catches one added since SDProp last set its adminCount.
-// ponytail: members by primary group only, and those in another domain's
-// protected groups (Enterprise Admins), count through adminCount alone.
+// is) or a domain controller, or is in a protected group of the domain or
+// its DnsAdmins, which also catches one added since SDProp last set its
+// adminCount. ponytail: members by primary group only, and those in another
+// domain's protected groups (Enterprise Admins) or in --protected-groups,
+// count through adminCount alone.
 func (c *Client) Reaches(ctx context.Context, dn string) (string, error) {
 	d, conn, e, err := c.preRead(ctx, dn)
 	if err != nil {
 		return "", err
 	}
-	if why := protected(e); why != "" || !slices.ContainsFunc(e.GetAttributeValues("objectClass"), func(c string) bool { return strings.EqualFold(c, "group") }) {
-		return why, nil
+	why, err := c.guard(ctx, d, conn, e)
+	if err != nil || why != "" || !slices.ContainsFunc(e.GetAttributeValues("objectClass"), func(c string) bool { return strings.EqualFold(c, "group") }) {
+		return why, err
 	}
 	head, err := conn.Search(ldap.NewSearchRequest(d.DN, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 1, 0, false, "(objectClass=*)", []string{"objectSid"}, nil))
 	if err != nil {
@@ -244,7 +367,7 @@ func (c *Client) Reaches(ctx context.Context, dn string) (string, error) {
 	if !strings.HasPrefix(domSID, "S-1-5-21-") {
 		return "", fmt.Errorf("%s: can't read the domain's objectSid, so its protected groups can't be found", d.DN)
 	}
-	f := "(|"
+	f := "(|(&(objectClass=group)(sAMAccountName=DnsAdmins))"
 	for _, r := range builtinProtected {
 		f += sidFilter(fmt.Sprintf("S-1-5-32-%d", r))
 	}

@@ -115,6 +115,10 @@ let
       "--ad-dc"
       (lib.concatStringsSep "," cfg.ad.dcs)
     ]
+    ++ optionals (cfg.ad.protectedGroups != [ ]) [
+      "--protected-groups"
+      (lib.concatStringsSep "," cfg.ad.protectedGroups)
+    ]
   )
   ++ optionals entraOn (
     arg "entra-tenant" cfg.entra.tenant
@@ -181,6 +185,12 @@ in
         default = [ ];
         example = [ "dc1.corp.example.com" ];
         description = "Static domain controller list, host or host:port (`--ad-dc`); empty means DNS SRV discovery.";
+      };
+      protectedGroups = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        example = [ "CORP\\Tier0 Admins" ];
+        description = "Extra groups, `DOMAIN\\name` or SID, whose members, direct or nested, writes never touch (`--protected-groups`).";
       };
     };
 
@@ -343,7 +353,8 @@ in
         wants = [ "network-online.target" ];
         serviceConfig = {
           Type = "exec";
-          ExecStart = "${lib.getExe cfg.package} ${lib.escapeShellArgs args}";
+          # systemd unescapes C-style escapes even inside quotes, so DOMAIN\name needs its backslash doubled.
+          ExecStart = "${lib.getExe cfg.package} ${lib.escapeShellArgs (map (lib.replaceStrings [ "\\" ] [ "\\\\" ]) args)}";
           Restart = "on-failure";
           RestartSec = 5;
           LoadCredential =

@@ -83,7 +83,7 @@ All are off by default. Turn them on with `--capabilities a,b,...` (or `capabili
 
 These hold whatever capabilities are on:
 - **Protected targets are refused in code.**
-  - In AD: `adminCount=1`, RID below 1000, `isCriticalSystemObject`, domain controllers, protected groups and anything nested in them.
+  - In AD: `adminCount=1`, RID below 1000, `isCriticalSystemObject`, domain controllers, protected groups and anything nested in them. That includes the forest root domain's BUILTIN groups for a principal of another domain, `DnsAdmins`, and the groups in `--protected-groups`. A membership the server can't read is a refusal.
   - In Entra: any directory-role holder, any member or owner of a role-assignable group, and any owner of an application or service principal.
   - For policy: a PSO apply that would reach a protected target, editing a PSO that already applies to one, and GPO link changes on the Domain Controllers OU.
 - **One target per write, by id.** There is no bulk mode and no selecting targets by filter. Delete, password reset, and Intune retire and wipe need `confirm` set to the target's name.
@@ -191,6 +191,7 @@ The module:
 | `ad.insecureSkipVerify` | `--ad-insecure-skip-verify` | `false` |
 | `ad.site` | `--ad-site` | none |
 | `ad.dcs` | `--ad-dc` | `[ ]` (DNS SRV discovery) |
+| `ad.protectedGroups` | `--protected-groups` | `[ ]` |
 | `entra.tenant`, `entra.clientId` | `--entra-tenant`, `--entra-client-id` | unset; both are needed for the Entra side |
 | `entra.certFile` | `--entra-cert-file` | required with `entra.tenant` |
 | `entra.cloud` | `--entra-cloud` | `global` |
@@ -237,6 +238,7 @@ Each flag marked with an env var can also be set through `MSDIR_` plus the flag 
 | `--ad-insecure-skip-verify` | | off; logs a warning when on |
 | `--ad-site` | `MSDIR_AD_SITE` | none; discovery then uses the site's SRV records |
 | `--ad-dc` | `MSDIR_AD_DC` | DNS SRV; a comma-separated `host` or `host:port` list |
+| `--protected-groups` | `MSDIR_PROTECTED_GROUPS` | none; a comma-separated list of extra AD groups, `DOMAIN\name` or SID, whose members (direct or nested) are protected targets. A group that can't be found refuses every AD write. |
 | `--entra-tenant` | `MSDIR_ENTRA_TENANT` | unset; a tenant ID or domain, and it turns the Entra side on |
 | `--entra-client-id` | `MSDIR_ENTRA_CLIENT_ID` | required with `--entra-tenant` |
 | `--entra-cert-file` | `MSDIR_ENTRA_CERT_FILE` | required with `--entra-tenant` |

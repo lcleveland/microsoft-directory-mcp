@@ -755,6 +755,11 @@ let
     why = refused("ad_user", {"action": "reset_password", "id": "vmuser200", "confirm": "vmuser200", "reason": "vm-test reset protected"})
     print("ad_user reset_password vmuser200", why)
     assert "protected target" in why, why
+    # So are a DnsAdmins member and a nested member of a --protected-groups group.
+    for u, g in (("vmuser201", "CN=DnsAdmins"), ("vmuser202", "CN=vm-guarded,")):
+        why = refused("ad_user", {"action": "reset_password", "id": u, "confirm": u, "reason": "vm-test reset protected"})
+        print("ad_user reset_password", u, why)
+        assert "protected target" in why and g in why, why
     before = call("ad_user", {"action": "get", "id": "vm-reset", "fields": ["pwdLastSet"]})["pwdLastSet"]
     why = refused("ad_user", {"action": "reset_password", "id": "vm-reset", "confirm": "vmuser200", "reason": "vm-test reset mismatch"})
     assert "confirm must be the target's name exactly" in why, why
@@ -980,6 +985,12 @@ pkgs.testers.runNixOSTest {
             samba-tool group addmembers 'Windows Authorization Access Group' ${bindUser} -s ${smbConf}
             # A protected target: a Domain Admins member, though writable by the bind account.
             samba-tool group addmembers 'Domain Admins' vmuser200 -s ${smbConf}
+            # Two more: a DnsAdmins member, and vmuser202 in vm-guarded (ad.protectedGroups) through vm-guarded-sub.
+            samba-tool group addmembers DnsAdmins vmuser201 -s ${smbConf}
+            samba-tool group add vm-guarded -s ${smbConf}
+            samba-tool group add vm-guarded-sub -s ${smbConf}
+            samba-tool group addmembers vm-guarded vm-guarded-sub -s ${smbConf}
+            samba-tool group addmembers vm-guarded-sub vmuser202 -s ${smbConf}
             ldbsearch -H /var/lib/samba-dc/private/sam.ldb '(sAMAccountName=vmuser042)' objectSid \
               | sed -n 's/^objectSid: //p' > ${syncedSid}
             grep -q '^S-1-5-21-' ${syncedSid}
@@ -1089,6 +1100,7 @@ pkgs.testers.runNixOSTest {
           bindPasswordFile = "/run/ad-bind-password";
           caFile = "/run/samba-ca.pem";
           dcs = [ dcHost ];
+          protectedGroups = [ "CORP\\vm-guarded" ];
         };
         entra = {
           inherit tenant clientId;
