@@ -133,8 +133,13 @@ type adIn struct {
 	Fields []string `json:"fields,omitempty" jsonschema:"LDAP attribute names to return instead of the default set (enabled is derived from userAccountControl); binary attributes come base64"`
 	Cursor string   `json:"cursor,omitempty" jsonschema:"next_cursor from the previous call with the same arguments, unchanged"`
 	writeIn
-	Expires    string `json:"expires,omitempty" jsonschema:"writes, set_expiry: when the account expires, an RFC 3339 time (2026-12-31T23:59:59Z), or never"`
-	MustChange *bool  `json:"must_change,omitempty" jsonschema:"writes, reset_password: make the user change the password at next logon; default true"`
+	Expires    string            `json:"expires,omitempty" jsonschema:"writes, set_expiry: when the account expires, an RFC 3339 time (2026-12-31T23:59:59Z), or never"`
+	MustChange *bool             `json:"must_change,omitempty" jsonschema:"writes, reset_password: make the user change the password at next logon; default true"`
+	Parent     string            `json:"parent,omitempty" jsonschema:"writes, create, move, restore: the DN of the OU or container to create in, move to (same domain), or restore to (default: its lastKnownParent)"`
+	Name       string            `json:"name,omitempty" jsonschema:"writes, create, rename: the object's name (its cn)"`
+	Sam        string            `json:"sam_account_name,omitempty" jsonschema:"writes, create: its sAMAccountName; default name (a computer's gets a $)"`
+	UPN        string            `json:"upn,omitempty" jsonschema:"writes, create: a user's userPrincipalName"`
+	Attributes map[string]string `json:"attributes,omitempty" jsonschema:"writes, create, edit: attributes to set by LDAP name, from the allowlist the tool description gives; on edit an empty value clears one"`
 }
 
 // keys are the fields asked for, or def.
@@ -147,8 +152,10 @@ func (in adIn) keys(def []string) []string {
 
 type adGroupIn struct {
 	adIn
-	Transitive bool     `json:"transitive,omitempty" jsonschema:"members: every nested member, not only direct ones"`
-	Members    []string `json:"members,omitempty" jsonschema:"writes, add_members, remove_members: up to 20 members by id (a DN, SID, GUID, UPN, sAMAccountName or DOMAIN\\sam)"`
+	Transitive   bool     `json:"transitive,omitempty" jsonschema:"members: every nested member, not only direct ones"`
+	Members      []string `json:"members,omitempty" jsonschema:"writes, add_members, remove_members: up to 20 members by id (a DN, SID, GUID, UPN, sAMAccountName or DOMAIN\\sam)"`
+	GroupScope   string   `json:"group_scope,omitempty" jsonschema:"writes, create: global (the default), domain_local or universal"`
+	Distribution bool     `json:"distribution,omitempty" jsonschema:"writes, create: a distribution group, not a security group"`
 }
 
 // search runs a fanned-out list of k, narrowed by the input.
@@ -371,6 +378,13 @@ const adSearchDoc = "Lists search every domain of the forest (domain narrows to 
 	"Keys are LDAP attribute names; values are decoded (SIDs, GUIDs, times as RFC 3339 UTC, null for never). " +
 	"filter takes a raw LDAP filter: read the ad://guide/ldap-filter resource first."
 
+// createAction is the create action of the AD tool for class.
+func createAction(tool, class string) adExtra {
+	return adExtra{Action{Name: "create", Capabilities: []string{"ad-objects"}}, func(d Deps, ctx context.Context, in adIn) (map[string]any, error) {
+		return d.create(ctx, tool, class, in, "")
+	}}
+}
+
 // adExtra is an action of an adReadTool beyond search and get, or one
 // replacing them.
 type adExtra struct {
@@ -412,6 +426,46 @@ func resetDoc(visible []string) string {
 		"Protected targets and accounts managed in the tenant are refused."
 }
 
+// createDoc describes the create action of the AD tool for class when it shows.
+func createDoc(class string, visible []string) string {
+	if !slices.Contains(visible, "create") {
+		return ""
+	}
+	what := map[string]string{
+		"user": "The user gets a password the server generates, returned once in the reply and never logged, and is " +
+			"enabled and must change it at next logon.",
+		"computer": "A pre-staged computer account (WORKSTATION_TRUST_ACCOUNT), with a password nobody learns: joining " +
+			"the machine to it sets its own.",
+		"group": "A security group of group_scope (global by default) unless distribution.",
+	}[class]
+	return "\n\ncreate (the ad-objects capability): one " + class + " named name under parent, with a reason; " +
+		"sam_account_name defaults to name. " + what + " attributes may set " + strings.Join(adObjectAttrs[class], ", ") +
+		". Sent to the PDC emulator of parent's domain (dc in the reply); never retried, so on a lost reply get it before trying again."
+}
+
+// objectWriteDoc describes ad_object's writes that show.
+func objectWriteDoc(visible []string) string {
+	out := ""
+	if slices.Contains(visible, "edit") {
+		out += "\n\nWrites (the ad-objects capability), one user, group or computer by id, with a reason: edit replaces " +
+			"attributes (an empty value clears one), only these: user " + strings.Join(adObjectAttrs["user"], ", ") +
+			"; group " + strings.Join(adObjectAttrs["group"], ", ") + "; computer " + strings.Join(adObjectAttrs["computer"], ", ") +
+			". rename gives it a new name (cn) in place; move puts it under parent, in the same domain (cross-domain moves are " +
+			"never made). Connect Sync's OU filter can't be read: moving an object with an Entra counterpart warns that " +
+			"the counterpart is soft-deleted on the next sync cycle if the new OU is out of sync scope."
+	}
+	if slices.Contains(visible, "delete") {
+		out += "\n\ndelete (the ad-delete capability): one user, group or computer by id, with confirm (its sAMAccountName) " +
+			"and a reason; leaf objects only, never a tree. It reaches Entra through sync. restore: a deleted object by the " +
+			"dn search_deleted gives, back under its lastKnownParent (or parent) with its old name; with the Recycle Bin " +
+			"on it regains its group memberships."
+	}
+	if out != "" {
+		out += " Protected targets and objects managed in the tenant are refused; each write goes to the PDC emulator."
+	}
+	return out
+}
+
 // membershipDoc describes add_members and remove_members when they show.
 const membershipDoc = "\n\nadd_members, remove_members (the ad-group-membership capability): up to 20 members of one " +
 	"group by id, with a reason, in one modify on the PDC emulator; a member already in (or already out) is no error. " +
@@ -419,6 +473,7 @@ const membershipDoc = "\n\nadd_members, remove_members (the ad-group-membership 
 	"managed in the tenant are refused."
 
 func adReadTool(name, group, title, desc string, k adKind, extra ...adExtra) Tool {
+	class := strings.TrimPrefix(name, "ad_")
 	actions := []Action{{Name: "search"}, {Name: "get"}}
 	for _, x := range extra {
 		if i := slices.IndexFunc(actions, func(a Action) bool { return a.Name == x.Name }); i >= 0 {
@@ -429,7 +484,8 @@ func adReadTool(name, group, title, desc string, k adKind, extra ...adExtra) Too
 	}
 	return Tool{Name: name, Group: group, Actions: actions,
 		add: func(s *mcp.Server, d Deps, t Tool, visible []string) {
-			addActionTool(s, d, t, &mcp.Tool{Name: name, Title: title, Description: desc + "\n\n" + adSearchDoc + accountStateDoc(visible) + resetDoc(visible),
+			addActionTool(s, d, t, &mcp.Tool{Name: name, Title: title, Description: desc + "\n\n" + adSearchDoc + accountStateDoc(visible) + resetDoc(visible) +
+				createDoc(class, visible),
 				Annotations: readOnly}, visible,
 				func(ctx context.Context, _ *mcp.CallToolRequest, in adIn) (*mcp.CallToolResult, map[string]any, error) {
 					for _, x := range extra {
@@ -463,13 +519,15 @@ func init() {
 				"The machine the bad passwords came from (event 4740) is not read."+counterpartDoc, adUsers,
 			adExtra{Action{Name: "resultant_policy", ADProbe: "pso-read"}, Deps.resultantPolicy}, adExtra{Action{Name: "lockout"}, Deps.lockout},
 			accountState("ad_user", adUsers, "disable"), accountState("ad_user", adUsers, "enable"), accountState("ad_user", adUsers, "unlock"),
-			accountState("ad_user", adUsers, "must_change"), accountState("ad_user", adUsers, "set_expiry"), resetPassword),
+			accountState("ad_user", adUsers, "must_change"), accountState("ad_user", adUsers, "set_expiry"), resetPassword,
+			createAction("ad_user", "user")),
 		Tool{Name: "ad_group", Group: "identity", Actions: []Action{{Name: "search"}, {Name: "get"}, {Name: "members"},
-			{Name: "add_members", Capabilities: []string{"ad-group-membership"}}, {Name: "remove_members", Capabilities: []string{"ad-group-membership"}}},
+			{Name: "add_members", Capabilities: []string{"ad-group-membership"}}, {Name: "remove_members", Capabilities: []string{"ad-group-membership"}},
+			{Name: "create", Capabilities: []string{"ad-objects"}}},
 			add: func(s *mcp.Server, d Deps, t Tool, visible []string) {
-				desc := ""
+				desc := createDoc("group", visible)
 				if slices.Contains(visible, "add_members") {
-					desc = membershipDoc
+					desc = membershipDoc + desc
 				}
 				addActionTool(s, d, t, &mcp.Tool{Name: t.Name, Title: "Active Directory groups", Annotations: readOnly,
 					Description: "Groups of the forest. search: list groups as briefs (dn, sAMAccountName, displayName, " +
@@ -488,6 +546,11 @@ func init() {
 							out, err = d.members(ctx, in)
 						case "add_members", "remove_members":
 							out, err = d.membership(ctx, in)
+						case "create":
+							var gt string
+							if gt, err = groupType(in.GroupScope, in.Distribution); err == nil {
+								out, err = d.create(ctx, "ad_group", "group", in.adIn, gt)
+							}
 						default:
 							out, err = d.search(ctx, adGroups, in.adIn, ad.Query{})
 						}
@@ -500,21 +563,37 @@ func init() {
 				"and version, managedBy, servicePrincipalName, supported encryption types and the LAPS password expiry "+
 				"(never the password)."+counterpartDoc, adComputers,
 			accountState("ad_computer", adComputers, "disable"), accountState("ad_computer", adComputers, "enable"),
-			accountState("ad_computer", adComputers, "set_expiry")),
+			accountState("ad_computer", adComputers, "set_expiry"), createAction("ad_computer", "computer")),
 		adOUTool,
-		Tool{Name: "ad_object", Group: "identity", Actions: []Action{{Name: "get"}, {Name: "search_deleted"}},
+		Tool{Name: "ad_object", Group: "identity", Actions: []Action{{Name: "get"}, {Name: "search_deleted"},
+			{Name: "edit", Capabilities: []string{"ad-objects"}}, {Name: "rename", Capabilities: []string{"ad-objects"}},
+			{Name: "move", Capabilities: []string{"ad-objects"}}, {Name: "delete", Capabilities: []string{"ad-delete"}},
+			{Name: "restore", Capabilities: []string{"ad-delete"}}},
 			add: func(s *mcp.Server, d Deps, t Tool, visible []string) {
 				addActionTool(s, d, t, &mcp.Tool{Name: t.Name, Title: "Any Active Directory object", Annotations: readOnly,
 					Description: "Any object of the forest. get: one object of any class by id (dn, objectClass, name, " +
 						"sAMAccountName, displayName, objectSid, objectGUID, whenCreated, whenChanged; fields for more). " +
 						"search_deleted: deleted objects still in each domain's Deleted Objects container, with " +
-						"lastKnownParent, narrowed by query or filter.\n\n" + adSearchDoc},
+						"lastKnownParent, narrowed by query or filter.\n\n" + adSearchDoc + objectWriteDoc(visible)},
 					visible, func(ctx context.Context, _ *mcp.CallToolRequest, in adIn) (*mcp.CallToolResult, map[string]any, error) {
-						if in.Action == "get" {
-							out, err := d.get(ctx, adObjects, in)
-							return nil, out, err
+						var (
+							out map[string]any
+							err error
+						)
+						switch in.Action {
+						case "get":
+							out, err = d.get(ctx, adObjects, in)
+						case "edit":
+							out, err = d.edit(ctx, in)
+						case "rename", "move":
+							out, err = d.moveOrRename(ctx, in)
+						case "delete":
+							out, err = d.deleteObject(ctx, in)
+						case "restore":
+							out, err = d.restore(ctx, in)
+						default:
+							out, err = d.search(ctx, adDeleted, in, ad.Query{Under: "CN=Deleted Objects", Scope: ldap.ScopeSingleLevel, ShowDeleted: true})
 						}
-						out, err := d.search(ctx, adDeleted, in, ad.Query{Under: "CN=Deleted Objects", Scope: ldap.ScopeSingleLevel, ShowDeleted: true})
 						return nil, out, err
 					})
 			}},

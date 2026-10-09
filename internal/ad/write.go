@@ -18,7 +18,7 @@ var ErrProtected = errors.New("protected target: the server never writes it, wha
 // what the protected check needs, its names (for confirm) and its source of
 // authority.
 var preRead = []string{"objectClass", "objectSid", "adminCount", "isCriticalSystemObject", "userAccountControl",
-	"primaryGroupID", "memberOf", "tokenGroups", "msDS-ObjectSoa", "sAMAccountName", "name"}
+	"primaryGroupID", "memberOf", "tokenGroups", "msDS-ObjectSoa", "sAMAccountName", "name", "isDeleted"}
 
 // The protected groups by RID (Appendix C of the AD security best practices):
 // their members, direct or nested, are protected targets.
@@ -32,16 +32,18 @@ var (
 
 // Modify writes the one object dn, if it matches class, on its domain's
 // PDC emulator (see Write). There it first reads the target (preRead plus
-// attrs) and refuses a protected target; then vet checks the entry and
-// builds the modify, which is sent once. Nothing is sent when vet errs.
-func (c *Client) Modify(ctx context.Context, dn, class string, attrs []string, vet func(*ldap.Entry) (*ldap.ModifyRequest, error)) (Target, error) {
+// attrs; deleted objects too, for a restore) and refuses a protected
+// target; then vet checks the entry and builds the request, a modify,
+// delete or modify DN of it, which is sent once. Nothing is sent when vet
+// errs.
+func (c *Client) Modify(ctx context.Context, dn, class string, attrs []string, vet func(*ldap.Entry) (any, error)) (Target, error) {
 	d, err := c.DomainOf(ctx, dn)
 	if err != nil {
 		return Target{}, err
 	}
 	return c.Write(ctx, d, func(conn Conn) error {
 		res, err := conn.Search(ldap.NewSearchRequest(dn, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 1, 0, false, class,
-			append(slices.Clone(preRead), attrs...), nil))
+			append(slices.Clone(preRead), attrs...), []ldap.Control{ldap.NewControlMicrosoftShowDeleted()}))
 		if ldap.IsErrorWithCode(err, ldap.LDAPResultNoSuchObject) || err == nil && len(res.Entries) == 0 {
 			return fmt.Errorf("%q: %w for this tool", dn, ErrNoMatch)
 		}
@@ -56,17 +58,59 @@ func (c *Client) Modify(ctx context.Context, dn, class string, attrs []string, v
 		if err != nil {
 			return err
 		}
-		err = conn.Modify(req)
-		if ldap.IsErrorWithCode(err, ldap.LDAPResultInsufficientAccessRights) {
-			var names []string
-			for _, ch := range req.Changes {
-				names = append(names, ch.Modification.Type)
-			}
-			return fmt.Errorf("%w; the bind account needs write access to %s on %s: delegate those attributes on its OU, not a whole property set",
-				err, strings.Join(slices.Compact(names), ", "), dn)
+		// A deleted object is written only by a modify that itself shows deleted objects: a restore.
+		if m, ok := req.(*ldap.ModifyRequest); strings.EqualFold(e.GetAttributeValue("isDeleted"), "TRUE") &&
+			(!ok || ldap.FindControl(m.Controls, ldap.ControlTypeMicrosoftShowDeleted) == nil) {
+			return fmt.Errorf("%s is deleted: only ad_object restore writes it", e.DN)
 		}
-		return err
+		if r, ok := req.(*ldap.ModifyDNRequest); ok && r.NewSuperior != "" {
+			to, err := c.DomainOf(ctx, r.NewSuperior)
+			if err != nil {
+				return err
+			}
+			if to.DN != d.DN {
+				return fmt.Errorf("%s is in %s and %s in %s: cross-domain moves are never made", e.DN, d.DNS, r.NewSuperior, to.DNS)
+			}
+		}
+		return send(conn, req)
 	})
+}
+
+// Add adds the object req names on the PDC emulator of its domain, once.
+func (c *Client) Add(ctx context.Context, req *ldap.AddRequest) (Target, error) {
+	d, err := c.DomainOf(ctx, req.DN)
+	if err != nil {
+		return Target{}, err
+	}
+	return c.Write(ctx, d, func(conn Conn) error { return send(conn, req) })
+}
+
+// send sends one write request, saying what the bind account lacks when
+// it is refused for access.
+func send(conn Conn, req any) error {
+	var err error
+	need := ""
+	switch r := req.(type) {
+	case *ldap.ModifyRequest:
+		var names []string
+		for _, ch := range r.Changes {
+			names = append(names, ch.Modification.Type)
+		}
+		err, need = conn.Modify(r), "write access to "+strings.Join(slices.Compact(names), ", ")+" on "+r.DN+
+			": delegate those attributes on its OU, not a whole property set"
+	case *ldap.AddRequest:
+		err, need = conn.Add(r), "Create Child for this class on the parent of "+r.DN
+	case *ldap.DelRequest:
+		err, need = conn.Del(r), "Delete on "+r.DN+" (or Delete Child on its parent)"
+	case *ldap.ModifyDNRequest:
+		err, need = conn.ModifyDN(r), "Delete Child on the parent of "+r.DN+", Create Child on the new parent, and write access to its name"
+	default:
+		panic(fmt.Sprintf("ad: not a write request: %T", req))
+	}
+	if ldap.IsErrorWithCode(err, ldap.LDAPResultInsufficientAccessRights) {
+		return fmt.Errorf("%w; the bind account needs %s", err, need)
+	}
+	return err
 }
 
 // protected says why the pre-read entry e is a protected target, or ""
@@ -86,8 +130,10 @@ func protected(e *ldap.Entry) string {
 	case isSID && rid < 1000:
 		return fmt.Sprintf("a built-in account or group (RID %d)", rid)
 	// An account always has its primary group in tokenGroups, so none at
-	// all means the bind account can't read it: fail closed.
-	case len(tokens) == 0 && (e.GetAttributeValue("primaryGroupID") != "" || len(e.GetAttributeValues("memberOf")) > 0):
+	// all means the bind account can't read it: fail closed. A deleted
+	// object has none to read: its links are hidden until it is restored,
+	// and adminCount stays to say it was in a protected group.
+	case len(tokens) == 0 && !strings.EqualFold(e.GetAttributeValue("isDeleted"), "TRUE") && (e.GetAttributeValue("primaryGroupID") != "" || len(e.GetAttributeValues("memberOf")) > 0):
 		return "its tokenGroups can't be read, so its group memberships can't be checked: add the bind account to the " +
 			"Windows Authorization Access Group of its domain"
 	}

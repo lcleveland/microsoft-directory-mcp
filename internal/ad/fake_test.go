@@ -1,6 +1,7 @@
 package ad
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"maps"
@@ -130,6 +131,45 @@ func (c *fakeConn) Modify(req *ldap.ModifyRequest) error {
 		}
 	}
 	c.f.tree[dn] = attrs
+	c.f.modifies = append(c.f.modifies, c.host+" "+req.DN)
+	return nil
+}
+
+// Add adds an entry to the fake tree.
+func (c *fakeConn) Add(req *ldap.AddRequest) error {
+	c.f.mu.Lock()
+	defer c.f.mu.Unlock()
+	dn := strings.ToLower(req.DN)
+	if _, ok := c.f.tree[dn]; ok {
+		return ldap.NewError(ldap.LDAPResultEntryAlreadyExists, errors.New("already exists"))
+	}
+	attrs := map[string][]string{}
+	for _, a := range req.Attributes {
+		attrs[a.Type] = a.Vals
+	}
+	c.f.tree[dn] = attrs
+	c.f.modifies = append(c.f.modifies, c.host+" "+req.DN)
+	return nil
+}
+
+// Del marks an entry deleted, as the Recycle Bin does (but in place).
+func (c *fakeConn) Del(req *ldap.DelRequest) error {
+	return c.Modify(&ldap.ModifyRequest{DN: req.DN, Changes: []ldap.Change{
+		{Operation: ldap.ReplaceAttribute, Modification: ldap.PartialAttribute{Type: "isDeleted", Vals: []string{"TRUE"}}}}})
+}
+
+// ModifyDN moves an entry to its new RDN and parent.
+func (c *fakeConn) ModifyDN(req *ldap.ModifyDNRequest) error {
+	c.f.mu.Lock()
+	defer c.f.mu.Unlock()
+	dn := strings.ToLower(req.DN)
+	attrs, ok := c.f.tree[dn]
+	if !ok {
+		return ldap.NewError(ldap.LDAPResultNoSuchObject, errors.New("no such object"))
+	}
+	_, parent, _ := strings.Cut(dn, ",")
+	delete(c.f.tree, dn)
+	c.f.tree[strings.ToLower(req.NewRDN+","+cmp.Or(req.NewSuperior, parent))] = attrs
 	c.f.modifies = append(c.f.modifies, c.host+" "+req.DN)
 	return nil
 }

@@ -415,7 +415,7 @@ let
 
     URL = "http://127.0.0.1:${toString mcpPort}/mcp"
     BEARER = ${builtins.toJSON httpToken}
-    ids = iter(range(1, 100))
+    ids = iter(range(1, 1000))
 
 
     def post(payload, session=None):
@@ -645,15 +645,16 @@ let
     added = call("entra_audit", {"action": "search", "filter": "activityDisplayName eq 'Add user'"})["results"]
     assert [a["initiatedBy"]["user"]["userPrincipalName"] for a in added] == ["admin@example.com"], added
 
-    # Writes: the server runs with --capabilities ad-account-state,ad-passwords,ad-group-membership,entra-account-state.
-    assert ad["enabled_capabilities"] == ["ad-account-state", "ad-passwords", "ad-group-membership"], ad
+    # Writes: the server runs with --capabilities ad-account-state,ad-passwords,ad-group-membership,ad-objects,ad-delete,entra-account-state.
+    assert ad["enabled_capabilities"] == ["ad-account-state", "ad-passwords", "ad-group-membership", "ad-objects", "ad-delete"], ad
     assert entra["enabled_capabilities"] == ["entra-account-state"], entra
     api = next(t for t in listed["result"]["tools"] if t["name"] == "ad_api")
-    assert api["inputSchema"]["properties"]["action"]["enum"] == ["search", "modify"], api
+    assert api["inputSchema"]["properties"]["action"]["enum"] == ["search", "modify", "add", "delete", "rename"], api
     user = next(t for t in listed["result"]["tools"] if t["name"] == "ad_user")
-    assert user["inputSchema"]["properties"]["action"]["enum"][-6:] == ["disable", "enable", "unlock", "must_change", "set_expiry", "reset_password"], user
-    # ad-delete is off: absent from the schemas, and refused if called anyway.
-    print("ad_api delete", refused("ad_api", {"action": "delete", "dn": "${userDN 43}", "reason": "vm-test"}))
+    assert user["inputSchema"]["properties"]["action"]["enum"][-7:] == ["disable", "enable", "unlock", "must_change", "set_expiry", "reset_password", "create"], user
+    # A raw delete is routed to the first-class action.
+    why = refused("ad_api", {"action": "delete", "dn": "${userDN 43}", "reason": "vm-test"})
+    assert "call ad_object delete instead" in why, why
     # Protected: a Domain Admins member, though the bind account could write it.
     why = refused("ad_user", {"action": "disable", "id": "vmuser200", "reason": "vm-test protected"})
     print("ad_user disable vmuser200", why)
@@ -693,6 +694,45 @@ let
         assert w["members"] == ["${userDN 100}"] and w["dc"] == "${dcHost}:636", w
         dns = [m["dn"] for m in call("ad_group", {"action": "members", "id": "vm-team"})["results"]]
         assert ("${userDN 100}" in dns) is present, dns
+
+    # ad-objects: create, edit, rename and move a user; an off-allowlist raw edit is refused.
+    w = call("ad_user", {"action": "create", "parent": "CN=Users,${base}", "name": "vm-new", "upn": "vm-new@corp.example.com",
+                         "attributes": {"displayName": "VM New"}, "reason": "vm-test create vm-new"})
+    print("ad_user create", json.dumps({k: v for k, v in w.items() if k != "password"}))
+    assert w["dn"] == "CN=vm-new,CN=Users,${base}" and w["must_change"] is True and len(w["password"]) >= 20, w["dn"]
+    with open("/tmp/vm-new-password", "w") as f:
+        f.write(w["password"])
+    new = call("ad_user", {"action": "get", "id": "vm-new", "fields": ["enabled", "displayName", "pwdLastSet", "userPrincipalName"]})
+    assert new["enabled"] is True and new["displayName"] == "VM New" and new["pwdLastSet"] in (None, "1601-01-01T00:00:00Z"), new
+    call("ad_object", {"action": "edit", "id": "vm-new", "attributes": {"title": "Tester", "displayName": ""}, "reason": "vm-test edit"})
+    new = call("ad_user", {"action": "get", "id": "vm-new", "fields": ["title", "displayName"]})
+    assert new.get("title") == "Tester" and "displayName" not in new, new
+    why = refused("ad_api", {"action": "modify", "dn": "CN=vm-new,CN=Users,${base}", "reason": "vm-test raw spn",
+                             "changes": [{"op": "add", "attribute": "servicePrincipalName", "values": ["HTTP/vm-new"]}]})
+    print("ad_api modify servicePrincipalName", why)
+    assert "not a write this server makes" in why, why
+    call("ad_api", {"action": "modify", "dn": "CN=vm-new,CN=Users,${base}", "reason": "vm-test raw edit",
+                    "changes": [{"op": "replace", "attribute": "description", "values": ["raw"]}]})
+    w = call("ad_object", {"action": "rename", "id": "vm-new", "name": "vm-renamed", "reason": "vm-test rename"})
+    assert call("ad_user", {"action": "get", "id": "vm-new", "fields": ["description"]}) == {"dn": "CN=vm-renamed,CN=Users,${base}", "description": "raw"}
+    w = call("ad_object", {"action": "move", "id": "vm-new", "parent": "OU=vm-ou,${base}", "reason": "vm-test move"})
+    print("ad_object move", json.dumps(w))
+    assert "warning" not in w, w
+    assert call("ad_user", {"action": "get", "id": "vm-new", "fields": ["name"]})["dn"] == "CN=vm-renamed,OU=vm-ou,${base}"
+
+    # ad-delete: a confirm mismatch sends nothing; delete, then restore from search_deleted.
+    assert "confirm must be" in refused("ad_object", {"action": "delete", "id": "vm-new", "confirm": "vm-renamed", "reason": "vm-test delete mismatch"})
+    w = call("ad_object", {"action": "delete", "id": "vm-new", "confirm": "vm-new", "reason": "vm-test delete"})
+    print("ad_object delete", json.dumps(w))
+    assert "sync" in w["warning"], w
+    refused("ad_user", {"action": "get", "id": "vm-new"})
+    gone = call("ad_object", {"action": "search_deleted", "filter": "(sAMAccountName=vm-new)"})["results"]
+    print("search_deleted", json.dumps(gone))
+    assert len(gone) == 1 and gone[0]["lastKnownParent"] == "OU=vm-ou,${base}", gone
+    w = call("ad_object", {"action": "restore", "id": gone[0]["dn"], "reason": "vm-test restore"})
+    print("ad_object restore", json.dumps(w))
+    assert w["restored_as"] == "CN=vm-renamed,OU=vm-ou,${base}", w
+    assert call("ad_user", {"action": "get", "id": "vm-new", "fields": ["objectGUID"]})["objectGUID"] == gone[0]["objectGUID"]
 
     # entra-account-state: the synced user's disable is refused and routed to AD; a cloud user's goes through.
     why = refused("entra_user", {"action": "disable", "id": synced["id"], "reason": "vm-test entra synced"})
@@ -760,6 +800,17 @@ pkgs.testers.runNixOSTest {
             samba-tool dsacl set -H /var/lib/samba-dc/private/sam.ldb -s ${smbConf} \
               --objectdn='CN=Users,${base}' --sddl="(A;CI;RPWPCR;;;$svcSid)"
             ldbadd -H /var/lib/samba-dc/private/sam.ldb ${seedLdif}
+            # It may also create, delete and move objects there and under OU=vm-ou, see and reanimate deleted objects.
+            samba-tool dsacl set -H /var/lib/samba-dc/private/sam.ldb -s ${smbConf} \
+              --objectdn='CN=Users,${base}' --sddl="(A;CI;CCDCSD;;;$svcSid)"
+            samba-tool dsacl set -H /var/lib/samba-dc/private/sam.ldb -s ${smbConf} \
+              --objectdn='OU=vm-ou,${base}' --sddl="(A;CI;RPWPCCDCSD;;;$svcSid)"
+            # dsacl can't re-read the deleted-objects container, so its descriptor is replaced whole.
+            printf 'dn: CN=Deleted Objects,${base}\nchangetype: modify\nreplace: nTSecurityDescriptor\nnTSecurityDescriptor: %s\n' \
+              "O:SYG:SYD:PAI(A;;CCDCLCSWRPWPSDRCWDWO;;;SY)(A;;LCRP;;;BA)(A;CI;RPLCWPSD;;;$svcSid)" \
+              | ldbmodify -H /var/lib/samba-dc/private/sam.ldb --controls=show_deleted:1
+            samba-tool dsacl set -H /var/lib/samba-dc/private/sam.ldb -s ${smbConf} \
+              --objectdn='${base}' --sddl="(OA;;CR;45ec5156-db7e-47bb-b53f-dbeb2d03c40f;;$svcSid)"
             # Writes read tokenGroups to find protected-group members; the bind account needs this group for that.
             samba-tool group addmembers 'Windows Authorization Access Group' ${bindUser} -s ${smbConf}
             # A protected target: a Domain Admins member, though writable by the bind account.
@@ -851,7 +902,7 @@ pkgs.testers.runNixOSTest {
         logLevel = "debug";
         extraArgs = [
           "--capabilities"
-          "ad-account-state,ad-passwords,ad-group-membership,entra-account-state"
+          "ad-account-state,ad-passwords,ad-group-membership,ad-objects,ad-delete,entra-account-state"
         ];
         http.authTokenFile = "/run/mcp-bearer";
         ad = {
@@ -926,6 +977,15 @@ pkgs.testers.runNixOSTest {
                    for x in journal.splitlines()), journal
         assert any('reason="vm-test add_members"' in x and "outcome=ok" in x and "capability=ad-group-membership" in x
                    for x in journal.splitlines()), journal
+
+    with subtest("the created user's password is not in the journal, and each object write is audited"):
+        pw = machine.succeed("cat /tmp/vm-new-password")
+        journal = machine.succeed("journalctl -o cat --no-pager -u microsoft-directory-mcp.service")
+        assert pw not in journal, "the created user's password leaked into the journal"
+        for reason, cap in (("create vm-new", "ad-objects"), ("edit", "ad-objects"), ("raw edit", "ad-objects"), ("rename", "ad-objects"),
+                            ("move", "ad-objects"), ("delete", "ad-delete"), ("restore", "ad-delete")):
+            assert any(f'reason="vm-test {reason}"' in x and "outcome=ok" in x and f"capability={cap}" in x
+                       for x in journal.splitlines()), reason
 
     with subtest("the stub recorded the cloud user's disable and no write to the synced user"):
         writes = machine.succeed("cat /tmp/stub-writes").splitlines()

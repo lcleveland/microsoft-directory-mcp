@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math/big"
 	"slices"
 	"strconv"
@@ -53,24 +54,38 @@ var adOps = []adOp{
 	{"modify", "gPOptions", "ad-gpo-links", "ad_gpo block_inheritance"},
 	{"modify", "msDS-PSOAppliesTo", "ad-password-policy", "ad_policy apply"},
 	{"modify", "isDeleted", "ad-delete", "ad_object restore"},
+	{"modify", "distinguishedName", "ad-delete", "ad_object restore"},
 	{"add", "", "ad-objects", "ad_user, ad_group or ad_computer create"},
 	{"delete", "", "ad-delete", "ad_object delete"},
 	{"rename", "", "ad-objects", "ad_object rename or move"},
 }
 
 // adObjectAttrs is the ad-objects allowlist: by object class, the
-// attributes ad_api may modify. The ad-objects issue fills it.
-var adObjectAttrs = map[string][]string{}
+// attributes ad_object edit, create and ad_api may set. Descriptive ones
+// only: nothing that grants access, delegates, or changes how anyone signs in.
+var adObjectAttrs = map[string][]string{
+	"user": {"description", "displayName", "givenName", "sn", "initials", "title", "department", "company", "manager",
+		"physicalDeliveryOfficeName", "telephoneNumber", "mobile", "streetAddress", "l", "st", "postalCode",
+		"employeeID", "employeeNumber", "info"},
+	"group":    {"description", "displayName", "info"},
+	"computer": {"description", "location"},
+}
+
+func init() { adObjectAttrs["inetOrgPerson"] = adObjectAttrs["user"] } // a user too
+
+// adEditable is the class filter of the objects ad_object writes.
+const adEditable = "(|(objectClass=user)(objectClass=group))"
 
 // classifyAD maps one AD write (op: modify, add, delete or rename; attr
 // for a modify) on an object of class (its most specific objectClass) to
-// the capability that allows it. raw is ad_api, where a write that a
-// first-class action makes is refused and pointed to that action.
+// the capability that allows it. raw is a write of the client's own
+// attributes (ad_api, ad_object edit), where a write that a first-class
+// action makes is refused and pointed to that action.
 func classifyAD(op, attr, class string, raw bool) (string, error) {
 	for _, o := range adOps {
 		if o.op == op && strings.EqualFold(o.attr, attr) {
 			if raw {
-				return "", fmt.Errorf("ad_api %s %s: call %s instead (the %s capability)", op, attr, o.action, o.capability)
+				return "", fmt.Errorf("%s %s: call %s instead (the %s capability)", op, attr, o.action, o.capability)
 			}
 			return o.capability, nil
 		}
@@ -81,21 +96,25 @@ func classifyAD(op, attr, class string, raw bool) (string, error) {
 	return "", fmt.Errorf("%s %s on %s is not a write this server makes", op, attr, cmp.Or(class, "this object"))
 }
 
-// adWrite is one AD write: an object, by id, and the changes made to it.
+// adWrite is one AD write: an object, by id, and what is done to it: a
+// modify (changes), a delete (del), or a rename or move (moveTo).
 type adWrite struct {
 	tool, action string
 	id, class    string // the target, resolved as reads resolve it
 	in           writeIn
-	raw          bool     // from ad_api: classified as raw
+	raw          bool     // the client's own attributes: classified as raw
 	confirm      bool     // in.Confirm must name the target
 	attrs        []string // read before the write, for changes
 	changes      func(*ldap.Entry) ([]ldap.Change, error)
 	controls     []ldap.Control
+	del          bool
+	moveTo       func(*ldap.Entry) (rdn, parent string, err error)
 }
 
-// adModify and adProtected are the transport's Modify and Protected; seams for tests.
+// adModify, adAdd and adProtected are the transport's; seams for tests.
 var (
 	adModify    = (*ad.Client).Modify
+	adAdd       = (*ad.Client).Add
 	adProtected = (*ad.Client).Protected
 )
 
@@ -117,31 +136,51 @@ func (d Deps) adWrite(ctx context.Context, w adWrite) (map[string]any, error) {
 		sent bool
 		cp   *Counterpart
 	)
-	tgt, err := adModify(d.AD, ctx, dn, w.class, w.attrs, func(e *ldap.Entry) (*ldap.ModifyRequest, error) {
+	tgt, err := adModify(d.AD, ctx, dn, w.class, w.attrs, func(e *ldap.Entry) (any, error) {
 		if name := cmp.Or(e.GetAttributeValue("sAMAccountName"), e.GetAttributeValue("name")); w.confirm && strings.TrimSpace(w.in.Confirm) != name {
 			return nil, fmt.Errorf("confirm must be the target's name exactly: %s is %q. Check it is the object you mean, then retry", e.DN, name)
 		}
-		changes, err := w.changes(e)
-		if err != nil {
-			return nil, err
+		var (
+			req any
+			ops [][2]string // op, attribute: what is classified
+		)
+		switch {
+		case w.del:
+			req, ops = ldap.NewDelRequest(e.DN, nil), [][2]string{{"delete", ""}}
+		case w.moveTo != nil:
+			rdn, parent, err := w.moveTo(e)
+			if err != nil {
+				return nil, err
+			}
+			req, ops = ldap.NewModifyDNRequest(e.DN, rdn, true, parent), [][2]string{{"rename", ""}}
+		default:
+			changes, err := w.changes(e)
+			if err != nil {
+				return nil, err
+			}
+			req = &ldap.ModifyRequest{DN: e.DN, Changes: changes, Controls: w.controls}
+			for _, ch := range changes {
+				ops = append(ops, [2]string{"modify", ch.Modification.Type})
+			}
 		}
 		var caps, names []string
 		cls := append([]string{""}, e.GetAttributeValues("objectClass")...)
-		for _, ch := range changes {
-			c, err := classifyAD("modify", ch.Modification.Type, cls[len(cls)-1], w.raw)
+		for _, o := range ops {
+			c, err := classifyAD(o[0], o[1], cls[len(cls)-1], w.raw)
 			if err != nil {
 				return nil, err
 			}
 			// A reset's must-change rides on its password write, under ad-passwords.
-			if strings.EqualFold(ch.Modification.Type, "pwdLastSet") && slices.ContainsFunc(changes, func(x ldap.Change) bool {
-				return strings.EqualFold(x.Modification.Type, "unicodePwd")
-			}) {
+			if strings.EqualFold(o[1], "pwdLastSet") && slices.ContainsFunc(ops, func(x [2]string) bool { return strings.EqualFold(x[1], "unicodePwd") }) {
 				c = "ad-passwords"
 			}
 			if !d.Config.Capabilities[c] {
-				return nil, fmt.Errorf("writing %s needs the %s capability, which the operator has not enabled", ch.Modification.Type, c)
+				return nil, fmt.Errorf("%s needs the %s capability, which the operator has not enabled", cmp.Or(o[1], o[0]), c)
 			}
-			caps, names = append(caps, c), append(names, ch.Modification.Type)
+			caps = append(caps, c)
+			if o[1] != "" {
+				names = append(names, o[1])
+			}
 		}
 		if cp, err = d.adAuthority(ctx, e); err != nil {
 			return nil, err
@@ -153,7 +192,7 @@ func (d Deps) adWrite(ctx context.Context, w adWrite) (map[string]any, error) {
 		// Logged before sending too, so a write cut off mid-call still has a record.
 		d.log().Info("ad write", append(audit, "outcome", "sending")...)
 		sent = true
-		return &ldap.ModifyRequest{DN: e.DN, Changes: changes, Controls: w.controls}, nil
+		return req, nil
 	})
 	audit = append(audit, "dc", tgt.DC, "fallback", tgt.Fallback)
 	if err != nil {
@@ -262,12 +301,7 @@ var resetPassword = adExtra{Action{Name: "reset_password", Capabilities: []strin
 		confirm: true, attrs: []string{"displayName"},
 		changes: func(e *ldap.Entry) ([]ldap.Change, error) {
 			pw = newPassword(0, e.GetAttributeValue("sAMAccountName"), e.GetAttributeValue("displayName"))
-			// unicodePwd is the password in quotes, as UTF-16LE; generated passwords are ASCII.
-			var v []byte
-			for _, c := range `"` + string(pw) + `"` {
-				v = append(v, byte(c), 0)
-			}
-			ch := []ldap.Change{{Operation: ldap.ReplaceAttribute, Modification: ldap.PartialAttribute{Type: "unicodePwd", Vals: []string{string(v)}}}}
+			ch := []ldap.Change{{Operation: ldap.ReplaceAttribute, Modification: ldap.PartialAttribute{Type: "unicodePwd", Vals: []string{unicodePwd(pw)}}}}
 			if must {
 				ch = append(ch, ldap.Change{Operation: ldap.ReplaceAttribute, Modification: ldap.PartialAttribute{Type: "pwdLastSet", Vals: []string{"0"}}})
 			}
@@ -279,6 +313,16 @@ var resetPassword = adExtra{Action{Name: "reset_password", Capabilities: []strin
 	out["password"], out["must_change"] = string(pw), must
 	return out, nil
 }}
+
+// unicodePwd is the value that sets pw: the password in quotes, as
+// UTF-16LE; generated passwords are ASCII.
+func unicodePwd(pw secret) string {
+	var v []byte
+	for _, c := range `"` + string(pw) + `"` {
+		v = append(v, byte(c), 0)
+	}
+	return string(v)
+}
 
 // maxMembers caps the members of one membership write (ADR 0001).
 const maxMembers = 20
@@ -323,6 +367,222 @@ func (d Deps) membership(ctx context.Context, in adGroupIn) (map[string]any, err
 		return nil, err
 	}
 	out["members"] = dns
+	return out, nil
+}
+
+// allowed refuses an attribute the ad-objects allowlist lacks for class.
+func allowed(class, attr string) error {
+	if !slices.ContainsFunc(adObjectAttrs[class], func(a string) bool { return strings.EqualFold(a, attr) }) {
+		return fmt.Errorf("%s is not an attribute this server sets on a %s; it sets %s", attr, class, strings.Join(adObjectAttrs[class], ", "))
+	}
+	return nil
+}
+
+// create is the create action (ad-objects) of the AD tool of class (user,
+// computer or group): one object named name under parent, its
+// sAMAccountName sam or name (a computer's ending in $), with allowlisted
+// attributes, in one add. A user gets a generated password, returned once,
+// must change it, and is enabled; a computer gets one nobody learns (a
+// join to it resets it); a group gets groupType.
+func (d Deps) create(ctx context.Context, tool, class string, in adIn, groupType string) (map[string]any, error) {
+	reason := strings.TrimSpace(in.Reason)
+	if reason == "" {
+		return nil, errReason
+	}
+	if in.Parent == "" || in.Name == "" {
+		return nil, errors.New("create needs parent (the DN of an OU or container) and name")
+	}
+	if in.UPN != "" && class != "user" {
+		return nil, errors.New("upn is for users")
+	}
+	dn := "CN=" + ldap.EscapeDN(in.Name) + "," + in.Parent
+	sam := cmp.Or(in.Sam, in.Name)
+	audit := []any{"tool", tool, "action", "create", "target", dn, "reason", reason}
+	req := ldap.NewAddRequest(dn, nil)
+	req.Attribute("objectClass", []string{class})
+	names := []string{"objectClass", "sAMAccountName"}
+	var pw secret
+	switch class {
+	case "user":
+		pw = newPassword(0, sam, in.Name, in.Attributes["displayName"])
+		req.Attribute("sAMAccountName", []string{sam})
+		if in.UPN != "" {
+			req.Attribute("userPrincipalName", []string{in.UPN})
+			names = append(names, "userPrincipalName")
+		}
+		// Enabled (NORMAL_ACCOUNT), with the password set in the same add, which must change at next logon.
+		req.Attribute("unicodePwd", []string{unicodePwd(pw)})
+		req.Attribute("userAccountControl", []string{"512"})
+		req.Attribute("pwdLastSet", []string{"0"})
+		names = append(names, "unicodePwd", "userAccountControl", "pwdLastSet")
+	case "computer":
+		sam = strings.TrimSuffix(sam, "$") + "$"
+		req.Attribute("sAMAccountName", []string{sam})
+		// WORKSTATION_TRUST_ACCOUNT, with a password rather than PASSWD_NOTREQD.
+		req.Attribute("unicodePwd", []string{unicodePwd(newPassword(0, sam))})
+		req.Attribute("userAccountControl", []string{"4096"})
+		names = append(names, "unicodePwd", "userAccountControl")
+	case "group":
+		req.Attribute("sAMAccountName", []string{sam})
+		req.Attribute("groupType", []string{groupType})
+		names = append(names, "groupType")
+	}
+	keys := slices.Sorted(maps.Keys(in.Attributes))
+	for _, k := range keys {
+		if err := allowed(class, k); err != nil {
+			d.log().Warn("ad write", append(audit, "outcome", "not sent", "error", err.Error())...)
+			return nil, err
+		}
+		if v := in.Attributes[k]; v != "" {
+			req.Attribute(k, []string{v})
+			names = append(names, k)
+		}
+	}
+	// Attribute names only: values (passwords among them) are never logged.
+	audit = append(audit, "capability", "ad-objects", "attributes", names)
+	d.log().Info("ad write", append(audit, "outcome", "sending")...)
+	tgt, err := adAdd(d.AD, ctx, req)
+	audit = append(audit, "dc", tgt.DC, "fallback", tgt.Fallback)
+	if err != nil {
+		d.log().Warn("ad write", append(audit, "outcome", "failed", "error", err.Error())...)
+		return nil, err
+	}
+	d.log().Info("ad write", append(audit, "outcome", "ok")...)
+	out := obj(tgt)
+	out["dn"], out["action"], out["sAMAccountName"] = dn, "create", sam
+	if class == "user" {
+		out["password"], out["must_change"] = string(pw), true
+	}
+	return out, nil
+}
+
+// groupType is the groupType of a new group: scope global, domain_local
+// or universal, a security group unless distribution.
+func groupType(scope string, distribution bool) (string, error) {
+	t, ok := map[string]uint32{"": 0x2, "global": 0x2, "domain_local": 0x4, "universal": 0x8}[scope]
+	if !ok {
+		return "", fmt.Errorf("group_scope %q: want global, domain_local or universal", scope)
+	}
+	if !distribution {
+		t |= 0x80000000 // SECURITY_ENABLED
+	}
+	return strconv.Itoa(int(int32(t))), nil
+}
+
+// edit is ad_object edit (ad-objects): allowlisted attributes of one
+// user, group or computer replaced, an empty value clearing one.
+func (d Deps) edit(ctx context.Context, in adIn) (map[string]any, error) {
+	if len(in.Attributes) == 0 {
+		return nil, errors.New("edit needs attributes")
+	}
+	var changes []ldap.Change
+	for _, k := range slices.Sorted(maps.Keys(in.Attributes)) {
+		var vals []string
+		if v := in.Attributes[k]; v != "" {
+			vals = []string{v}
+		}
+		changes = append(changes, ldap.Change{Operation: ldap.ReplaceAttribute, Modification: ldap.PartialAttribute{Type: k, Vals: vals}})
+	}
+	return d.adWrite(ctx, adWrite{tool: "ad_object", action: "edit", id: in.ID, class: adEditable, in: in.writeIn, raw: true,
+		changes: func(*ldap.Entry) ([]ldap.Change, error) { return changes, nil }})
+}
+
+// moveOrRename is ad_object rename (a new name, same parent) or move (a
+// new parent in the same domain), ad-objects. Connect Sync's OU filter
+// can't be read, so a move of an object with a counterpart warns.
+func (d Deps) moveOrRename(ctx context.Context, in adIn) (map[string]any, error) {
+	moved, dn := false, ""
+	out, err := d.adWrite(ctx, adWrite{tool: "ad_object", action: in.Action, id: in.ID, class: adEditable, in: in.writeIn,
+		moveTo: func(e *ldap.Entry) (string, string, error) {
+			p, err := ldap.ParseDN(e.DN)
+			if err != nil {
+				return "", "", err
+			}
+			rdn := p.RDNs[0].Attributes[0]
+			if in.Action == "rename" {
+				if in.Name == "" {
+					return "", "", errors.New("rename needs name")
+				}
+				r := rdn.Type + "=" + ldap.EscapeDN(in.Name)
+				dn = r + "," + parentOf(e.DN)
+				return r, "", nil
+			}
+			to, err := ldap.ParseDN(in.Parent)
+			if err != nil || in.Parent == "" {
+				return "", "", fmt.Errorf("move needs parent, the DN of an OU or container of the same domain: %q", in.Parent)
+			}
+			moved = !to.EqualFold(&ldap.DN{RDNs: p.RDNs[1:]})
+			r := rdn.Type + "=" + ldap.EscapeDN(rdn.Value)
+			dn = r + "," + in.Parent
+			return r, in.Parent, nil
+		}})
+	if err != nil {
+		return nil, err
+	}
+	out["dn"] = dn
+	if moved && out["sync"] != nil {
+		out["warning"] = "its parent OU changed, and this server can't read Connect Sync's OU filter: if the new OU is " +
+			"out of sync scope, its Entra counterpart is soft-deleted on the next sync cycle"
+	}
+	return out, nil
+}
+
+// parentOf is dn without its first RDN, as written.
+func parentOf(dn string) string {
+	for i := 0; i < len(dn); i++ {
+		switch dn[i] {
+		case '\\':
+			i++
+		case ',':
+			return dn[i+1:]
+		}
+	}
+	return ""
+}
+
+// deleteObject is ad_object delete (ad-delete): one leaf object, with
+// confirm. Never a tree delete.
+func (d Deps) deleteObject(ctx context.Context, in adIn) (map[string]any, error) {
+	out, err := d.adWrite(ctx, adWrite{tool: "ad_object", action: "delete", id: in.ID, class: adEditable, in: in.writeIn,
+		confirm: true, del: true})
+	if err != nil {
+		return nil, err
+	}
+	out["warning"] = "a delete reaches Entra through sync: if the object is in sync scope, its Entra counterpart is " +
+		"deleted on the next sync cycle. ad_object restore brings it back here, with search_deleted's dn"
+	return out, nil
+}
+
+// restore is ad_object restore (ad-delete): a deleted object, by the dn
+// search_deleted gives, reanimated under its lastKnownParent (or parent)
+// with its old name. With the Recycle Bin on it regains its group
+// memberships, so a former protected-group member (adminCount) is refused.
+func (d Deps) restore(ctx context.Context, in adIn) (map[string]any, error) {
+	var dn string
+	out, err := d.adWrite(ctx, adWrite{tool: "ad_object", action: "restore", id: in.ID, class: adDeleted.class, in: in.writeIn,
+		attrs: []string{"lastKnownParent", "msDS-LastKnownRDN"}, controls: []ldap.Control{ldap.NewControlMicrosoftShowDeleted()},
+		changes: func(e *ldap.Entry) ([]ldap.Change, error) {
+			p, err := ldap.ParseDN(e.DN)
+			if err != nil {
+				return nil, err
+			}
+			rdn := p.RDNs[0].Attributes[0]
+			// A deleted object's name is its old one, then a newline and DEL:<objectGUID>.
+			name, _, _ := strings.Cut(cmp.Or(e.GetAttributeValue("msDS-LastKnownRDN"), rdn.Value), "\n")
+			parent := cmp.Or(in.Parent, e.GetAttributeValue("lastKnownParent"))
+			if parent == "" {
+				return nil, fmt.Errorf("%s has no lastKnownParent: pass parent", e.DN)
+			}
+			dn = rdn.Type + "=" + ldap.EscapeDN(name) + "," + parent
+			return []ldap.Change{
+				{Operation: ldap.DeleteAttribute, Modification: ldap.PartialAttribute{Type: "isDeleted"}},
+				{Operation: ldap.ReplaceAttribute, Modification: ldap.PartialAttribute{Type: "distinguishedName", Vals: []string{dn}}},
+			}, nil
+		}})
+	if err != nil {
+		return nil, err
+	}
+	out["restored_as"] = dn
 	return out, nil
 }
 
