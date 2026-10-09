@@ -17,9 +17,6 @@ import (
 )
 
 func TestClassifyEntra(t *testing.T) {
-	old := entraObjectProps
-	entraObjectProps = map[string][]string{"users": {"jobTitle"}}
-	t.Cleanup(func() { entraObjectProps = old })
 	for _, tc := range []struct {
 		method, path string
 		props        []string
@@ -47,8 +44,12 @@ func TestClassifyEntra(t *testing.T) {
 		{"POST", "deviceManagement/managedDevices/m1/wipe", nil, true, "", "", "call entra_device wipe instead"},
 		{"PATCH", "users/u1", []string{"jobTitle", "accountEnabled"}, true, "", "", "call entra_user disable or enable instead"},
 		// Raw: the entra-objects allowlist, by collection, and nothing else.
-		{"PATCH", "users/u1", []string{"jobTitle"}, true, "entra-objects", "ad_api modify", ""},
+		{"PATCH", "users/u1", []string{"jobTitle"}, true, "entra-objects", "ad_object edit", ""},
+		{"PATCH", "users/u1", []string{"usageLocation"}, true, "entra-objects", "", ""}, // cloud-only: allowed on synced
+		{"PATCH", "groups/g1", []string{"description"}, true, "entra-objects", "ad_object edit", ""},
 		{"PATCH", "groups/g1", []string{"jobTitle"}, true, "", "", "not a write this server makes"},
+		{"PATCH", "users/u1", []string{"mail"}, true, "", "", "not a write this server makes"},
+		{"PATCH", "groups/g1", []string{"isAssignableToRole"}, true, "", "", "not a write this server makes"},
 		{"PATCH", "users/u1", []string{"jobTitle"}, false, "", "", "not a write this server makes"},
 		{"PATCH", "users/u1", nil, false, "", "", "a patch needs a body"},
 		{"PATCH", "users/u1/manager", []string{"jobTitle"}, true, "", "", "not a write this server makes"},
@@ -88,6 +89,9 @@ const (
 	m1 = "00000000-0000-0000-0000-0000000000b1"
 	// sp1 is a service principal holding a directory role.
 	sp1 = "00000000-0000-0000-0000-0000000000c1"
+	// dv1 is a cloud device, dv2 a synced one.
+	dv1 = "00000000-0000-0000-0000-0000000000e1"
+	dv2 = "00000000-0000-0000-0000-0000000000e2"
 )
 
 // entraWriteStub answers the pre-reads of the users and groups above, the
@@ -117,12 +121,20 @@ func entraWriteStub(write string) func(*http.Request) string {
 			return `{"@odata.type":"#microsoft.graph.servicePrincipal","id":"` + sp1 + `"}`
 		case strings.HasPrefix(p, "/v1.0/directoryObjects/"):
 			return `{"@odata.type":"#microsoft.graph.user","id":"` + path.Base(p) + `"}`
+		case path.Base(p) == g1:
+			return `{"id":"` + g1 + `","displayName":"staff"}`
+		case path.Base(p) == dv1:
+			return `{"id":"` + dv1 + `","displayName":"pc1"}`
+		case path.Base(p) == dv2:
+			return `{"id":"` + dv2 + `","displayName":"pc2","onPremisesSyncEnabled":true,"onPremisesSecurityIdentifier":"S-1-5-21-1-2-3-1107"}`
 		case path.Base(p) == g2:
 			return `{"id":"` + g2 + `","displayName":"synced","onPremisesSyncEnabled":true,"onPremisesSecurityIdentifier":"S-1-5-21-1-2-3-1106"}`
 		case path.Base(p) == g3:
-			return `{"id":"` + g3 + `","displayName":"tier0","isAssignableToRole":true}`
+			return `{"@odata.type":"#microsoft.graph.group","id":"` + g3 + `","displayName":"tier0","isAssignableToRole":true}`
 		case path.Base(p) == u2:
 			return `{"id":"` + u2 + `","userPrincipalName":"u2@example.com","onPremisesSyncEnabled":true,"onPremisesSecurityIdentifier":"S-1-5-21-1-2-3-1105"}`
+		case strings.Contains(p, "/deletedItems/"):
+			return `{"@odata.type":"#microsoft.graph.user","id":"` + path.Base(p) + `","userPrincipalName":"gone@example.com"}`
 		}
 		return `{"id":"` + path.Base(p) + `","userPrincipalName":"user@example.com"}`
 	}
@@ -217,7 +229,7 @@ func TestEntraWriteRefusals(t *testing.T) {
 			return d.apiWrite(context.Background(), entraAPIIn{ActionParam: ActionParam{"post"}, Path: "/v1.0/roleManagement/directory/roleAssignments", Reason: "r"})
 		}, "not a write this server makes"},
 		{"raw unlisted property", []string{"entra-objects"}, func(d Deps) (map[string]any, error) {
-			return d.apiWrite(context.Background(), entraAPIIn{ActionParam: ActionParam{"patch"}, Path: "/v1.0/users/" + u1, Reason: "r", Body: map[string]any{"jobTitle": "x"}})
+			return d.apiWrite(context.Background(), entraAPIIn{ActionParam: ActionParam{"patch"}, Path: "/v1.0/users/" + u1, Reason: "r", Body: map[string]any{"mail": "x@example.com"}})
 		}, "not a write this server makes"},
 	} {
 		d, _, writes := entraWriteDeps(t, "", tc.caps...)
@@ -456,5 +468,179 @@ func TestEntraCredentialsRegister(t *testing.T) {
 	}
 	if p := props(t, cs, "entra_group"); !slices.Contains(p, "members") || !slices.Contains(p, "reason") || slices.Contains(p, "confirm") {
 		t.Errorf("entra_group: %v", p)
+	}
+}
+
+// Create sends one POST of the object with allowlisted properties: a user
+// enabled, with a generated password it must change, returned once and
+// never logged; a group a security group, never role-assignable.
+func TestEntraCreate(t *testing.T) {
+	d, buf, _ := entraWriteDeps(t, `{"id":"`+u1+`"}`, "entra-objects")
+	d, bodies := entraBodies(t, d, `{"id":"`+u1+`"}`)
+	out, err := entraCall(d, entraCreate(entraUsers), entraIn{Name: "New User", UPN: "new.user@example.com",
+		Properties: map[string]string{"jobTitle": "Engineer", "department": ""}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pw, _ := out["password"].(string)
+	want := `POST /v1.0/users {"accountEnabled":true,"displayName":"New User","jobTitle":"Engineer","mailNickname":"new.user",` +
+		`"passwordProfile":{"forceChangePasswordNextSignIn":true,"password":"` + pw + `"},"userPrincipalName":"new.user@example.com"}`
+	if len(pw) < 20 || out["id"] != u1 || out["must_change"] != true || !slices.Equal(bodies(), []string{want}) {
+		t.Errorf("reply %v, wrote %v", out, bodies())
+	}
+	if log := buf.String(); strings.Contains(log, pw) || !strings.Contains(log, "capability=entra-objects") || !strings.Contains(log, "outcome=ok") {
+		t.Errorf("audit log:\n%s", log)
+	}
+	if _, err := entraCall(d, entraCreate(entraGroups), entraIn{Name: "Team (EU) #1", Properties: map[string]string{"description": "d"}}); err != nil {
+		t.Fatal(err)
+	}
+	if want := `POST /v1.0/groups {"description":"d","displayName":"Team (EU) #1","mailEnabled":false,"mailNickname":"TeamEU1","securityEnabled":true}`; bodies()[1] != want {
+		t.Errorf("wrote %s, want %s", bodies()[1], want)
+	}
+
+	for _, tc := range []struct {
+		name string
+		caps []string
+		k    entraKind
+		in   entraIn
+		says string
+	}{
+		{"no reason", []string{"entra-objects"}, entraUsers, entraIn{Name: "n", UPN: "n@example.com", writeIn: writeIn{Reason: " "}}, "reason is required"},
+		{"capability off", []string{"entra-delete"}, entraUsers, entraIn{Name: "n", UPN: "n@example.com"}, "needs the entra-objects capability"},
+		{"no upn", []string{"entra-objects"}, entraUsers, entraIn{Name: "n"}, "create needs upn"},
+		{"no name", []string{"entra-objects"}, entraGroups, entraIn{}, "create needs name"},
+		{"role-assignable", []string{"entra-objects"}, entraGroups, entraIn{Name: "n", Properties: map[string]string{"isAssignableToRole": "true"}},
+			"isAssignableToRole is not a property this server sets on groups"},
+		{"not allowlisted", []string{"entra-objects"}, entraUsers, entraIn{Name: "n", UPN: "n@example.com", Properties: map[string]string{"mobilePhone": "1"}},
+			"mobilePhone is not a property this server sets on users"},
+	} {
+		d, _, writes := entraWriteDeps(t, "", tc.caps...)
+		_, err := entraCall(d, entraCreate(tc.k), tc.in)
+		if err == nil || !strings.Contains(err.Error(), tc.says) || len(writes()) != 0 {
+			t.Errorf("%s: %v, wrote %v", tc.name, err, writes())
+		}
+	}
+}
+
+// Edit patches allowlisted properties, an empty value clearing one; on a
+// synced object only the cloud-only ones. The manager is set by reference.
+func TestEntraEdit(t *testing.T) {
+	d, _, _ := entraWriteDeps(t, "", "entra-objects")
+	d, bodies := entraBodies(t, d, "")
+	if _, err := entraCall(d, entraEdit(entraUsers), entraIn{ID: u1, Properties: map[string]string{"jobTitle": "x", "department": ""}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entraCall(d, entraEdit(entraUsers), entraIn{ID: u2, Properties: map[string]string{"usageLocation": "US"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entraCall(d, entraManager("set_manager"), entraIn{ID: u1, Manager: u5}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entraCall(d, entraManager("remove_manager"), entraIn{ID: u1}); err != nil {
+		t.Fatal(err)
+	}
+	ref := d.Graph.URL("/v1.0/users/")
+	if want := []string{
+		`PATCH /v1.0/users/` + u1 + ` {"department":null,"jobTitle":"x"}`,
+		`PATCH /v1.0/users/` + u2 + ` {"usageLocation":"US"}`,
+		`PUT /v1.0/users/` + u1 + `/manager/$ref {"@odata.id":"` + ref + u5 + `"}`,
+		`DELETE /v1.0/users/` + u1 + `/manager/$ref `,
+	}; !slices.Equal(bodies(), want) {
+		t.Errorf("wrote %q, want %q", bodies(), want)
+	}
+
+	for _, tc := range []struct {
+		name string
+		a    entraAction
+		in   entraIn
+		says string
+	}{
+		{"synced property", entraEdit(entraUsers), entraIn{ID: u2, Properties: map[string]string{"jobTitle": "x"}},
+			"synced from the forest (onPremisesSyncEnabled says so): call ad_object edit"},
+		{"synced group", entraEdit(entraGroups), entraIn{ID: g2, Properties: map[string]string{"description": "x"}}, "call ad_object edit"},
+		{"first-class property", entraEdit(entraUsers), entraIn{ID: u1, Properties: map[string]string{"accountEnabled": "false"}},
+			"call entra_user disable or enable instead"},
+		{"not allowlisted", entraEdit(entraUsers), entraIn{ID: u1, Properties: map[string]string{"mail": "x@example.com"}}, "not a write this server makes"},
+		{"none", entraEdit(entraUsers), entraIn{ID: u1}, "edit needs properties"},
+		{"clear displayName", entraEdit(entraUsers), entraIn{ID: u1, Properties: map[string]string{"displayName": ""}}, "displayName can't be cleared"},
+		{"protected", entraEdit(entraUsers), entraIn{ID: u3, Properties: map[string]string{"jobTitle": "x"}}, "protected target"},
+		{"synced manager", entraManager("set_manager"), entraIn{ID: u2, Manager: u1}, "call ad_object edit"},
+		{"manager not a GUID", entraManager("set_manager"), entraIn{ID: u1, Manager: "boss@example.com"}, "want the manager's object id"},
+	} {
+		d, _, writes := entraWriteDeps(t, "", "entra-objects")
+		_, err := entraCall(d, tc.a, tc.in)
+		if err == nil || !strings.Contains(err.Error(), tc.says) || len(writes()) != 0 {
+			t.Errorf("%s: %v, wrote %v", tc.name, err, writes())
+		}
+	}
+}
+
+// Delete needs confirm, the user's UPN or a group's or device's
+// displayName; synced objects are refused and routed to AD. Restore posts
+// to deletedItems, refusing a deleted protected target.
+func TestEntraDeleteRestore(t *testing.T) {
+	d, _, writes := entraWriteDeps(t, "", "entra-delete")
+	for _, c := range []struct {
+		a       entraAction
+		id      string
+		confirm string
+	}{
+		{entraDelete(entraUsers), u1, "User@example.com"},
+		{entraDelete(entraGroups), g1, "staff"},
+		{entraDelete(entraDevices), dv1, "pc1"},
+		{entraRestore(entraUsers), u1, ""},
+	} {
+		if _, err := entraCall(d, c.a, entraIn{ID: c.id, writeIn: writeIn{Confirm: c.confirm}}); err != nil {
+			t.Fatalf("%s %s: %v", c.a.Name, c.id, err)
+		}
+	}
+	if want := []string{"DELETE /v1.0/users/" + u1, "DELETE /v1.0/groups/" + g1, "DELETE /v1.0/devices/" + dv1,
+		"POST /v1.0/directory/deletedItems/" + u1 + "/restore"}; !slices.Equal(writes(), want) {
+		t.Errorf("wrote %v, want %v", writes(), want)
+	}
+
+	for _, tc := range []struct {
+		name string
+		a    entraAction
+		in   entraIn
+		says string
+	}{
+		{"no confirm", entraDelete(entraUsers), entraIn{ID: u1}, `confirm must be the target's userPrincipalName: ` + u1 + ` is "user@example.com"`},
+		{"group confirm", entraDelete(entraGroups), entraIn{ID: g1, writeIn: writeIn{Confirm: "user@example.com"}}, `confirm must be the target's displayName: ` + g1 + ` is "staff"`},
+		{"synced user", entraDelete(entraUsers), entraIn{ID: u2, writeIn: writeIn{Confirm: "u2@example.com"}}, "call ad_object delete"},
+		{"synced device", entraDelete(entraDevices), entraIn{ID: dv2, writeIn: writeIn{Confirm: "pc2"}}, "call ad_object delete"},
+		{"protected", entraDelete(entraGroups), entraIn{ID: g3, writeIn: writeIn{Confirm: "tier0"}}, "protected target: it is a role-assignable group"},
+		{"deleted role-assignable group", entraRestore(entraGroups), entraIn{ID: g3}, "protected target: it is a role-assignable group"},
+		{"deleted role holder", entraRestore(entraUsers), entraIn{ID: u6}, "protected target: it holds the directory role"},
+		{"restore of another kind", entraRestore(entraGroups), entraIn{ID: u1}, "is a #microsoft.graph.user, not a group"},
+	} {
+		d, _, writes := entraWriteDeps(t, "", "entra-delete")
+		_, err := entraCall(d, tc.a, tc.in)
+		if err == nil || !strings.Contains(err.Error(), tc.says) || len(writes()) != 0 {
+			t.Errorf("%s: %v, wrote %v", tc.name, err, writes())
+		}
+	}
+}
+
+// With entra-objects and entra-delete on, their actions and parameters show.
+func TestEntraObjectsRegister(t *testing.T) {
+	cs, _ := entraSession(t, nil, func(*http.Request) string { return `{}` }, "entra-objects", "entra-delete")
+	got := listed(t, cs)
+	for name, want := range map[string][]string{
+		"entra_user":   {"create", "edit", "set_manager", "remove_manager", "delete", "restore"},
+		"entra_group":  {"create", "edit", "delete", "restore"},
+		"entra_device": {"delete"},
+	} {
+		if g := got[name]; len(g) < len(want) || !slices.Equal(g[len(g)-len(want):], want) {
+			t.Errorf("%s: %v, want it to end %v", name, g, want)
+		}
+	}
+	for _, want := range []string{"reason", "confirm", "name", "upn", "properties", "manager"} {
+		if !slices.Contains(props(t, cs, "entra_user"), want) {
+			t.Errorf("entra_user lacks %s", want)
+		}
+	}
+	if p := props(t, cs, "entra_device"); !slices.Contains(p, "confirm") || slices.Contains(p, "properties") {
+		t.Errorf("entra_device: %v", p)
 	}
 }

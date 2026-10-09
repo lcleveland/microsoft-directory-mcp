@@ -13,8 +13,9 @@
 #                            directory audit events (activityDisplayName filters);
 #                            a synced user whose SID is vmuser042's, read from
 #                            /var/lib/samba-dc/vm-synced-sid (onPremisesSyncBehavior refused: 403)
-#                            PATCH of a user's accountEnabled or passwordProfile, empty role assignments,
-#                            memberships and ownerships; every write recorded in /tmp/stub-writes
+#                            PATCH of a user's accountEnabled, passwordProfile or other properties; POST
+#                            of a cloud user, its DELETE and restore from deletedItems; empty role
+#                            assignments, memberships and ownerships; every write recorded in /tmp/stub-writes
 #   microsoft-directory-mcp  the module's HTTP service
 #
 # One full MCP session calls ad_status (a simple bind over LDAPS, trusting
@@ -45,8 +46,8 @@ let
   # vmuser042's objectSid, written at provisioning for the stub's synced user.
   syncedSid = "/var/lib/samba-dc/vm-synced-sid";
   # An unsigned JWT the server decodes for the startup probe. Payload:
-  # {"aud":"https://graph.microsoft.com","roles":["Organization.Read.All","User.Read.All","LicenseAssignment.Read.All","GroupMember.Read.All","Device.Read.All","Application.Read.All","AuditLog.Read.All","User.EnableDisableAccount.All","User.RevokeSessions.All","RoleManagement.Read.Directory","User-PasswordProfile.ReadWrite.All","UserAuthMethod-TAP.ReadWrite.All","UserAuthenticationMethod.ReadWrite.All","GroupMember.ReadWrite.All"]}
-  accessToken = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJhdWQiOiJodHRwczovL2dyYXBoLm1pY3Jvc29mdC5jb20iLCJyb2xlcyI6WyJPcmdhbml6YXRpb24uUmVhZC5BbGwiLCJVc2VyLlJlYWQuQWxsIiwiTGljZW5zZUFzc2lnbm1lbnQuUmVhZC5BbGwiLCJHcm91cE1lbWJlci5SZWFkLkFsbCIsIkRldmljZS5SZWFkLkFsbCIsIkFwcGxpY2F0aW9uLlJlYWQuQWxsIiwiQXVkaXRMb2cuUmVhZC5BbGwiLCJVc2VyLkVuYWJsZURpc2FibGVBY2NvdW50LkFsbCIsIlVzZXIuUmV2b2tlU2Vzc2lvbnMuQWxsIiwiUm9sZU1hbmFnZW1lbnQuUmVhZC5EaXJlY3RvcnkiLCJVc2VyLVBhc3N3b3JkUHJvZmlsZS5SZWFkV3JpdGUuQWxsIiwiVXNlckF1dGhNZXRob2QtVEFQLlJlYWRXcml0ZS5BbGwiLCJVc2VyQXV0aGVudGljYXRpb25NZXRob2QuUmVhZFdyaXRlLkFsbCIsIkdyb3VwTWVtYmVyLlJlYWRXcml0ZS5BbGwiXX0.stub";
+  # {"aud":"https://graph.microsoft.com","roles":["Organization.Read.All","User.Read.All","LicenseAssignment.Read.All","GroupMember.Read.All","Device.Read.All","Application.Read.All","AuditLog.Read.All","User.EnableDisableAccount.All","User.RevokeSessions.All","RoleManagement.Read.Directory","User-PasswordProfile.ReadWrite.All","UserAuthMethod-TAP.ReadWrite.All","UserAuthenticationMethod.ReadWrite.All","GroupMember.ReadWrite.All","User.ReadWrite.All","User.DeleteRestore.All"]}
+  accessToken = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJhdWQiOiJodHRwczovL2dyYXBoLm1pY3Jvc29mdC5jb20iLCJyb2xlcyI6WyJPcmdhbml6YXRpb24uUmVhZC5BbGwiLCJVc2VyLlJlYWQuQWxsIiwiTGljZW5zZUFzc2lnbm1lbnQuUmVhZC5BbGwiLCJHcm91cE1lbWJlci5SZWFkLkFsbCIsIkRldmljZS5SZWFkLkFsbCIsIkFwcGxpY2F0aW9uLlJlYWQuQWxsIiwiQXVkaXRMb2cuUmVhZC5BbGwiLCJVc2VyLkVuYWJsZURpc2FibGVBY2NvdW50LkFsbCIsIlVzZXIuUmV2b2tlU2Vzc2lvbnMuQWxsIiwiUm9sZU1hbmFnZW1lbnQuUmVhZC5EaXJlY3RvcnkiLCJVc2VyLVBhc3N3b3JkUHJvZmlsZS5SZWFkV3JpdGUuQWxsIiwiVXNlckF1dGhNZXRob2QtVEFQLlJlYWRXcml0ZS5BbGwiLCJVc2VyQXV0aGVudGljYXRpb25NZXRob2QuUmVhZFdyaXRlLkFsbCIsIkdyb3VwTWVtYmVyLlJlYWRXcml0ZS5BbGwiLCJVc2VyLlJlYWRXcml0ZS5BbGwiLCJVc2VyLkRlbGV0ZVJlc3RvcmUuQWxsIl19.stub";
 
   # Seed data, ldbadd-ed into sam.ldb at provisioning: 250 users (more than
   # one page), vm-team with five users and the nested vm-sub (two more);
@@ -197,6 +198,8 @@ let
     # A group of user 1 and the device.
     SEED["members"] = {"00000000-0000-0000-0000-000000000401": [SEED["users"][0], SEED["devices"][0]]}
     THROTTLED = set()
+    # Users made by POST /v1.0/users, and those deleted, by id.
+    CREATED, DELETED = [], {}
 
 
     def record(name, value):
@@ -293,7 +296,7 @@ let
 
 
     def user(h, query, key):
-        for u in SEED["users"] + [synced()]:
+        for u in SEED["users"] + CREATED + [synced()]:
             if urllib.parse.unquote(key) in (u["id"], u["userPrincipalName"]):
                 return h.reply(200, u)
         h.error(404, "Request_ResourceNotFound", key)
@@ -312,14 +315,48 @@ let
 
 
     def user_patch(h, query, key):
-        """Sets accountEnabled on a seeded user, or takes a passwordProfile; the synced user is never written."""
+        """Sets properties of a seeded or created user (null removes one), taking a passwordProfile; the synced user is never written."""
         body = json.loads(h.body())
-        for u in SEED["users"]:
+        for u in SEED["users"] + CREATED:
             if urllib.parse.unquote(key) in (u["id"], u["userPrincipalName"]):
-                u.update({k: v for k, v in body.items() if k == "accountEnabled"})
+                u.update({k: v for k, v in body.items() if k != "passwordProfile" and v is not None})
+                for k in [k for k, v in body.items() if v is None]:
+                    u.pop(k, None)
                 h.send_response(204)
                 return h.end_headers()
         h.error(404, "Request_ResourceNotFound", key)
+
+
+    def user_create(h, query):
+        """A cloud user, with the next id from ...110."""
+        body = json.loads(h.body())
+        u = {k: v for k, v in body.items() if k != "passwordProfile"}
+        u.update({"@odata.type": "#microsoft.graph.user", "id": "00000000-0000-0000-0000-%012d" % (110 + len(CREATED) + len(DELETED))})
+        CREATED.append(u)
+        h.reply(201, u)
+
+
+    def user_delete(h, query, key):
+        for u in CREATED:
+            if key == u["id"]:
+                CREATED.remove(u)
+                DELETED[key] = u
+                h.send_response(204)
+                return h.end_headers()
+        h.error(404, "Request_ResourceNotFound", key)
+
+
+    def deleted_item(h, query, key):
+        if key not in DELETED:
+            return h.error(404, "Request_ResourceNotFound", key)
+        h.reply(200, DELETED[key])
+
+
+    def restore(h, query, key):
+        if key not in DELETED:
+            return h.error(404, "Request_ResourceNotFound", key)
+        CREATED.append(DELETED.pop(key))
+        h.reply(200, CREATED[-1])
 
 
     def none(h, query, key):
@@ -343,6 +380,7 @@ let
         ("GET", "/v1.0/auditLogs/signIns"): no_premium,
         ("GET", "/v1.0/auditLogs/directoryAudits"): audits,
         ("GET", "/v1.0/users"): users,
+        ("POST", "/v1.0/users"): user_create,
         ("GET", "/v1.0/devices"): by_sid("devices"),
         ("GET", "/v1.0/groups"): by_sid("groups"),
         ("GET", "/v1.0/applications"): listing("applications"),
@@ -355,6 +393,9 @@ let
     PATTERNS = [
         ("GET", re.compile(r"/v1\.0/users/([^/]+)"), user),
         ("PATCH", re.compile(r"/v1\.0/users/([^/]+)"), user_patch),
+        ("DELETE", re.compile(r"/v1\.0/users/([^/]+)"), user_delete),
+        ("GET", re.compile(r"/v1\.0/directory/deletedItems/([^/]+)"), deleted_item),
+        ("POST", re.compile(r"/v1\.0/directory/deletedItems/([^/]+)/restore"), restore),
         ("GET", re.compile(r"/v1\.0/users/([^/]+)/(?:transitiveMemberOf|ownedObjects)"), none),
         ("GET", re.compile(r"/v1\.0/groups/([^/]+)/members"), group_members),
         ("GET", re.compile(r"/v1\.0/(users|groups)/[^/]+/onPremisesSyncBehavior"), no_grant),
@@ -482,13 +523,15 @@ let
     # The startup probe: the roles claim decoded, P1 absent from subscribedSkus,
     # Intune present from its read probe. Later issues assert their hidden actions.
     probe = entra["probe"]
-    assert probe["roles"] == ["Organization.Read.All", "User.Read.All", "LicenseAssignment.Read.All", "GroupMember.Read.All", "Device.Read.All", "Application.Read.All", "AuditLog.Read.All", "User.EnableDisableAccount.All", "User.RevokeSessions.All", "RoleManagement.Read.Directory", "User-PasswordProfile.ReadWrite.All", "UserAuthMethod-TAP.ReadWrite.All", "UserAuthenticationMethod.ReadWrite.All", "GroupMember.ReadWrite.All"], probe
+    assert probe["roles"] == ["Organization.Read.All", "User.Read.All", "LicenseAssignment.Read.All", "GroupMember.Read.All", "Device.Read.All", "Application.Read.All", "AuditLog.Read.All", "User.EnableDisableAccount.All", "User.RevokeSessions.All", "RoleManagement.Read.Directory", "User-PasswordProfile.ReadWrite.All", "UserAuthMethod-TAP.ReadWrite.All", "UserAuthenticationMethod.ReadWrite.All", "GroupMember.ReadWrite.All", "User.ReadWrite.All", "User.DeleteRestore.All"], probe
     assert probe["licences"] == {"P1": "absent", "P2": "absent", "Intune": "present"}, probe
     assert "group_reads" not in probe and "notes" not in probe, probe
     assert entra["enabled_groups"] == ["core", "identity", "security", "policy", "devices", "infra"], entra
     assert entra["password_writeback"] == {"value": "off", "source": "operator-declared"}, entra
     hidden = {h["tool"] + " " + h["action"]: h["reason"] for h in entra["hidden_actions"]}
-    assert sorted(hidden) == ["entra_device managed_get", "entra_device managed_search",
+    # The token has no Group.* or Device.* write permission: those entra-objects and entra-delete writes are hidden.
+    assert sorted(hidden) == ["entra_device delete", "entra_device managed_get", "entra_device managed_search",
+                              "entra_group create", "entra_group delete", "entra_group edit", "entra_group restore",
                               "entra_policy auth_methods_policy", "entra_policy conditional_access", "entra_policy named_locations", "entra_policy security_defaults",
                               "entra_risk risk_detections", "entra_risk risky_users", "entra_role eligibility", "entra_signin search", "entra_user auth_methods", "entra_user registration"], sorted(hidden)
     # AuditLog.Read.All is granted: sign-ins are hidden for the licence alone.
@@ -646,10 +689,10 @@ let
     assert [a["initiatedBy"]["user"]["userPrincipalName"] for a in added] == ["admin@example.com"], added
 
     # Writes: the server runs with --capabilities ad-account-state,ad-passwords,ad-group-membership,ad-objects,ad-delete,
-    # ad-gpo-links,ad-password-policy,entra-account-state,entra-credentials,entra-group-membership.
+    # ad-gpo-links,ad-password-policy,entra-account-state,entra-credentials,entra-group-membership,entra-objects,entra-delete.
     assert ad["enabled_capabilities"] == ["ad-account-state", "ad-passwords", "ad-group-membership", "ad-objects", "ad-delete",
                                           "ad-gpo-links", "ad-password-policy"], ad
-    assert entra["enabled_capabilities"] == ["entra-account-state", "entra-credentials", "entra-group-membership"], entra
+    assert entra["enabled_capabilities"] == ["entra-account-state", "entra-credentials", "entra-group-membership", "entra-objects", "entra-delete"], entra
     api = next(t for t in listed["result"]["tools"] if t["name"] == "ad_api")
     assert api["inputSchema"]["properties"]["action"]["enum"] == ["search", "modify", "add", "delete", "rename"], api
     user = next(t for t in listed["result"]["tools"] if t["name"] == "ad_user")
@@ -773,6 +816,29 @@ let
     assert w["endpoint"] == "PATCH /v1.0/users/entra-user2@example.com" and w["must_change"] is True and len(w["password"]) >= 20, w
     with open("/tmp/vm-entra-password", "w") as fh:
         fh.write(w["password"])
+
+    # entra-objects and entra-delete: create a cloud user, edit it, delete it with confirm and restore it.
+    w = call("entra_user", {"action": "create", "name": "VM New", "upn": "vm-entra-new@example.com", "properties": {"jobTitle": "Tester"},
+                            "reason": "vm-test entra create"})
+    assert w["endpoint"] == "POST /v1.0/users" and w["must_change"] is True and len(w["password"]) >= 20, w
+    new = w["id"]
+    with open("/tmp/vm-entra-new-password", "w") as fh:
+        fh.write(w["password"])
+    call("entra_user", {"action": "edit", "id": new, "properties": {"department": "QA", "jobTitle": ""}, "reason": "vm-test entra edit"})
+    got = call("entra_user", {"action": "get", "id": new})
+    print("entra_user get created", json.dumps(got))
+    assert got["displayName"] == "VM New" and got["department"] == "QA" and "jobTitle" not in got, got
+    why = refused("entra_user", {"action": "edit", "id": synced["id"], "properties": {"jobTitle": "x"}, "reason": "vm-test entra edit synced"})
+    print("entra_user edit synced", why)
+    assert "call ad_object edit on " + by_upn["dn"] in why, why
+    why = refused("entra_user", {"action": "delete", "id": new, "confirm": "entra-user1@example.com", "reason": "vm-test entra delete mismatch"})
+    assert 'confirm must be the target\'s userPrincipalName: ' + new + ' is "vm-entra-new@example.com"' in why, why
+    w = call("entra_user", {"action": "delete", "id": new, "confirm": "vm-entra-new@example.com", "reason": "vm-test entra delete"})
+    assert w["endpoint"] == "DELETE /v1.0/users/" + new, w
+    refused("entra_user", {"action": "get", "id": new})
+    w = call("entra_user", {"action": "restore", "id": new, "reason": "vm-test entra restore"})
+    assert w["endpoint"] == "POST /v1.0/directory/deletedItems/" + new + "/restore" and w["name"] == "vm-entra-new@example.com", w
+    assert call("entra_user", {"action": "get", "id": new})["department"] == "QA"
     print("ok")
   '';
 
@@ -933,7 +999,7 @@ pkgs.testers.runNixOSTest {
         logLevel = "debug";
         extraArgs = [
           "--capabilities"
-          "ad-account-state,ad-passwords,ad-group-membership,ad-objects,ad-delete,ad-gpo-links,ad-password-policy,entra-account-state,entra-credentials,entra-group-membership"
+          "ad-account-state,ad-passwords,ad-group-membership,ad-objects,ad-delete,ad-gpo-links,ad-password-policy,entra-account-state,entra-credentials,entra-group-membership,entra-objects,entra-delete"
         ];
         http.authTokenFile = "/run/mcp-bearer";
         ad = {
@@ -1026,8 +1092,21 @@ pkgs.testers.runNixOSTest {
                    for x in journal.splitlines()), journal
         assert any('reason="vm-test entra reset synced"' in x and 'outcome="not sent"' in x for x in journal.splitlines()), journal
 
+    with subtest("the created Entra user's password is not in the journal, and each Entra object write is audited"):
+        pw = machine.succeed("cat /tmp/vm-entra-new-password")
+        journal = machine.succeed("journalctl -o cat --no-pager -u microsoft-directory-mcp.service")
+        assert pw not in journal, "the created Entra user's password leaked into the journal"
+        for reason, cap in (("entra create", "entra-objects"), ("entra edit", "entra-objects"), ("entra delete", "entra-delete"),
+                            ("entra restore", "entra-delete")):
+            assert any(f'reason="vm-test {reason}"' in x and "outcome=ok" in x and f"capability={cap}" in x
+                       for x in journal.splitlines()), reason
+        for reason in ("entra edit synced", "entra delete mismatch"):
+            assert any(f'reason="vm-test {reason}"' in x and 'outcome="not sent"' in x for x in journal.splitlines()), reason
+
     with subtest("the stub recorded the cloud users' writes and no write to the synced user"):
         writes = machine.succeed("cat /tmp/stub-writes").splitlines()
-        assert writes == ["PATCH /v1.0/users/entra-user3@example.com", "PATCH /v1.0/users/entra-user2@example.com"], writes
+        new = "/v1.0/users/00000000-0000-0000-0000-000000000110"
+        assert writes == ["PATCH /v1.0/users/entra-user3@example.com", "PATCH /v1.0/users/entra-user2@example.com", "POST /v1.0/users",
+                          "PATCH " + new, "DELETE " + new, "POST /v1.0/directory/deletedItems/00000000-0000-0000-0000-000000000110/restore"], writes
   '';
 }

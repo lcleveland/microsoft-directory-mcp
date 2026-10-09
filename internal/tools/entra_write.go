@@ -44,8 +44,8 @@ var entraOps = []entraOp{
 	{"DELETE", "groups/{}/members/{}/$ref", "", "entra-group-membership", "entra_group remove_members", "ad_group remove_members"},
 	{"POST", "users", "", "entra-objects", "entra_user create", ""},
 	{"POST", "groups", "", "entra-objects", "entra_group create", ""},
-	{"PUT", "users/{}/manager/$ref", "", "entra-objects", "entra_user set_manager", "ad_api modify"},
-	{"DELETE", "users/{}/manager/$ref", "", "entra-objects", "entra_user remove_manager", "ad_api modify"},
+	{"PUT", "users/{}/manager/$ref", "", "entra-objects", "entra_user set_manager", "ad_object edit"},
+	{"DELETE", "users/{}/manager/$ref", "", "entra-objects", "entra_user remove_manager", "ad_object edit"},
 	{"DELETE", "users/{}", "", "entra-delete", "entra_user delete", "ad_object delete"},
 	{"DELETE", "groups/{}", "", "entra-delete", "entra_group delete", "ad_object delete"},
 	{"DELETE", "devices/{}", "", "entra-delete", "entra_device delete", "ad_object delete"},
@@ -62,13 +62,29 @@ var entraOps = []entraOp{
 }
 
 // entraObjectProps is the entra-objects allowlist: by collection, the
-// properties entra_api may PATCH. The entra-objects issue fills it.
-// ponytail: every listed property is refused on a synced object; that issue
-// tells synced properties from cloud ones.
-var entraObjectProps = map[string][]string{}
+// properties create, edit and entra_api may set. Descriptive ones only, as
+// in AD: nothing that signs anyone in, routes mail, changes a phone (a
+// sensitive action) or makes a group role-assignable.
+var entraObjectProps = map[string][]string{
+	"users": {"displayName", "givenName", "surname", "jobTitle", "department", "companyName", "officeLocation",
+		"streetAddress", "city", "state", "postalCode", "country", "employeeId", "employeeType", "usageLocation"},
+	"groups": {"displayName", "description"},
+}
+
+// entraCloudProps are the allowlisted properties sync never writes, so
+// Entra may set them on a synced object; sync writes every other one.
+var entraCloudProps = []string{"usageLocation"}
 
 // entraKinds are the collections whose objects a write can target.
 var entraKinds = map[string]entraKind{"users": entraUsers, "groups": entraGroups, "devices": entraDevices}
+
+// entraDeleted is directory/deletedItems: deleted users and groups, kept 30 days.
+var entraDeleted = entraKind{path: "/v1.0/directory/deletedItems"}
+
+// hasFold reports whether list holds s, ignoring case.
+func hasFold(list []string, s string) bool {
+	return slices.ContainsFunc(list, func(x string) bool { return strings.EqualFold(x, s) })
+}
 
 // pathIs reports whether path (under /v1.0) matches pattern.
 func pathIs(pattern, path string) bool {
@@ -104,11 +120,15 @@ func classifyEntra(method, path string, props []string, raw bool) ([]entraOp, er
 		switch {
 		case i >= 0 && raw:
 			o := entraOps[i]
-			return nil, fmt.Errorf("entra_api %s %s: call %s instead (the %s capability)", method, path, o.action, o.capability)
+			return nil, fmt.Errorf("%s %s: call %s instead (the %s capability)", method, path, o.action, o.capability)
 		case i >= 0:
 			ops = append(ops, entraOps[i])
-		case raw && len(segs) == 2 && slices.ContainsFunc(entraObjectProps[segs[0]], func(p string) bool { return strings.EqualFold(p, prop) }):
-			ops = append(ops, entraOp{capability: "entra-objects", synced: "ad_api modify"})
+		case raw && len(segs) == 2 && hasFold(entraObjectProps[segs[0]], prop):
+			o := entraOp{capability: "entra-objects", synced: "ad_object edit"}
+			if hasFold(entraCloudProps, prop) {
+				o.synced = ""
+			}
+			ops = append(ops, o)
 		default:
 			return nil, fmt.Errorf("%s %s %s is not a write this server makes", method, path, prop)
 		}
@@ -124,16 +144,18 @@ type entraWrite struct {
 	id           string
 	in           writeIn
 	raw          bool
-	confirm      bool // in.Confirm must be the target's userPrincipalName
+	confirm      bool // in.Confirm must be the target's userPrincipalName, or displayName
 	method       string
 	rels         []string // none: the object itself
 	body         map[string]any
 	check        func(context.Context) error // more refusals, after the target's
 	reply        any                         // decodes the last call's reply
+	typ          string                      // the target's @odata.type must be this, when set
 }
 
-// entraWrite runs w through the Entra rails. Every Entra write goes through
-// here, so none skips the reason, the capability its call classifies to,
+// entraWrite runs w through the Entra rails. Every Entra write to an
+// existing object goes through here (create, with none, is entraCreate),
+// so none skips the reason, the capability its call classifies to,
 // the pre-read, the protected target and source of authority refusals, or
 // the audit log. Nothing is retried.
 func (d Deps) entraWrite(ctx context.Context, w entraWrite) (map[string]any, error) {
@@ -182,14 +204,24 @@ func (d Deps) entraWrite(ctx context.Context, w entraWrite) (map[string]any, err
 			fields = append(fields, "userPrincipalName")
 		case entraGroups.path:
 			fields = append(fields, "isAssignableToRole")
+		case entraDeleted.path:
+			fields = nil // a deleted object of any type: all of it
 		}
 		var tgt map[string]any
 		if err := d.Graph.Object(ctx, base, graph.Params{Fields: fields}, &tgt); err != nil {
 			return nil, err
 		}
 		upn, _ := tgt["userPrincipalName"].(string)
-		if w.confirm && !strings.EqualFold(strings.TrimSpace(w.in.Confirm), upn) {
-			return nil, fmt.Errorf("confirm must be the target's userPrincipalName: %v is %q. Check it is the user you mean, then retry", tgt["id"], upn)
+		name, _ := tgt["displayName"].(string)
+		if w.confirm && !strings.EqualFold(strings.TrimSpace(w.in.Confirm), cmp.Or(upn, name)) {
+			what := "displayName"
+			if w.kind.path == entraUsers.path {
+				what = "userPrincipalName"
+			}
+			return nil, fmt.Errorf("confirm must be the target's %s: %v is %q. Check it is the object you mean, then retry", what, tgt["id"], cmp.Or(upn, name))
+		}
+		if w.typ != "" && tgt["@odata.type"] != w.typ {
+			return nil, fmt.Errorf("%v is a %v, not a %s: call the tool of its kind", tgt["id"], tgt["@odata.type"], strings.TrimPrefix(w.typ, "#microsoft.graph."))
 		}
 		if err := d.entraProtected(ctx, w.kind, tgt); err != nil {
 			return nil, err
@@ -221,7 +253,6 @@ func (d Deps) entraWrite(ctx context.Context, w entraWrite) (map[string]any, err
 				return nil, onPremMastered(err)
 			}
 		}
-		name, _ := tgt["displayName"].(string)
 		return map[string]any{"id": tgt["id"], "name": cmp.Or(upn, name), "action": w.action, "endpoint": endpoint}, nil
 	}()
 	if err != nil {
@@ -241,6 +272,9 @@ func (d Deps) entraWrite(ctx context.Context, w entraWrite) (map[string]any, err
 // group or owning one. A Graph error fails closed.
 // ponytail: active assignments only; a PIM-eligible holder passes until it
 // activates, and Graph refuses writes on it to a User Administrator.
+// ponytail: a deleted user's memberships and ownerships can't be read, so
+// its restore checks role assignments only; Graph refuses restoring a role
+// holder to a User Administrator.
 func (d Deps) entraProtected(ctx context.Context, k entraKind, tgt map[string]any) error {
 	id, _ := tgt["id"].(string)
 	refuse := func(why string) error {
@@ -249,7 +283,7 @@ func (d Deps) entraProtected(ctx context.Context, k entraKind, tgt map[string]an
 	if tgt["isAssignableToRole"] == true {
 		return refuse("is a role-assignable group")
 	}
-	if k.path != entraUsers.path && k.path != entraSPs.path {
+	if k.path != entraUsers.path && k.path != entraSPs.path && tgt["@odata.type"] != entraUsers.typ {
 		return nil
 	}
 	p, err := d.Graph.List(ctx, "/v1.0/roleManagement/directory/roleAssignments", graph.Params{
@@ -260,6 +294,9 @@ func (d Deps) entraProtected(ctx context.Context, k entraKind, tgt map[string]an
 	if len(p.Results) > 0 {
 		r := p.Results[0]
 		return refuse(fmt.Sprintf("holds the directory role %v at scope %v", r["roleDefinitionId"], r["directoryScopeId"]))
+	}
+	if k.path == entraDeleted.path {
+		return nil
 	}
 	for _, x := range [][2]string{{"/transitiveMemberOf", "is in"}, {"/ownedObjects", "owns"}} {
 		rel, how := x[0], x[1]
@@ -474,16 +511,227 @@ func entraMembership(action string) entraAction {
 		}}
 }
 
-// entraGroupDoc describes the entra-group-membership actions that show,
-// or is "" when none does.
+// entraCreate is entra_user or entra_group create (entra-objects): one
+// cloud object in one POST, with allowlisted properties. A user gets a
+// generated password, returned once, which it must change, and is enabled;
+// a group is a security group, never mail-enabled or role-assignable.
+// Never retried, like every write.
+func entraCreate(k entraKind) entraAction {
+	tool, col := "entra_group", "groups"
+	perms := []string{"Group.Create", "Group.ReadWrite.All", "Directory.ReadWrite.All"}
+	if k.path == entraUsers.path {
+		tool, col, perms = "entra_user", "users", []string{"User.ReadWrite.All", "Directory.ReadWrite.All"}
+	}
+	return entraAction{Action{Name: "create", Perms: perms, Capabilities: []string{"entra-objects"}},
+		func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
+			reason := strings.TrimSpace(in.Reason)
+			if reason == "" {
+				return nil, errReason
+			}
+			endpoint := "POST " + k.path
+			audit := []any{"tool", tool, "action", "create", "target", cmp.Or(in.UPN, in.Name), "endpoint", endpoint, "reason", reason}
+			body := map[string]any{"displayName": in.Name}
+			var pw secret
+			err := func() error {
+				if in.Name == "" {
+					return errors.New("create needs name, the new object's displayName")
+				}
+				if k.path == entraUsers.path {
+					nick, _, ok := strings.Cut(in.UPN, "@")
+					if !ok || nick == "" {
+						return errors.New("create needs upn, the new user's userPrincipalName")
+					}
+					pw = newPassword(0, nick, in.Name)
+					body["userPrincipalName"], body["mailNickname"], body["accountEnabled"] = in.UPN, nick, true
+					body["passwordProfile"] = map[string]any{"password": string(pw), "forceChangePasswordNextSignIn": true}
+				} else {
+					body["mailNickname"], body["mailEnabled"], body["securityEnabled"] = mailNickname(in.Name), false, true
+				}
+				for p, v := range in.Properties {
+					if !hasFold(entraObjectProps[col], p) {
+						return fmt.Errorf("%s is not a property this server sets on %s; it sets %s", p, col, strings.Join(entraObjectProps[col], ", "))
+					}
+					if v != "" {
+						body[p] = v
+					}
+				}
+				ops, err := classifyEntra(http.MethodPost, col, nil, false)
+				if err == nil && !d.Config.Capabilities[ops[0].capability] {
+					err = fmt.Errorf("%s needs the %s capability, which the operator has not enabled", endpoint, ops[0].capability)
+				}
+				return err
+			}()
+			// Property names only: values (passwords among them) are never logged.
+			audit = append(audit, "capability", "entra-objects", "properties", slices.Sorted(maps.Keys(body)))
+			if err != nil {
+				d.log().Warn("entra write", append(audit, "outcome", "not sent", "error", err.Error())...)
+				return nil, err
+			}
+			d.log().Info("entra write", append(audit, "outcome", "sending")...)
+			var made map[string]any
+			if err := d.Graph.Do(ctx, http.MethodPost, k.path, body, &made); err != nil {
+				d.log().Warn("entra write", append(audit, "outcome", "failed", "error", err.Error())...)
+				return nil, err
+			}
+			d.log().Info("entra write", append(audit, "outcome", "ok", "id", made["id"])...)
+			out := map[string]any{"id": made["id"], "name": cmp.Or(in.UPN, in.Name), "action": "create", "endpoint": endpoint}
+			if pw != "" {
+				out["password"], out["must_change"] = string(pw), true
+			}
+			return out, nil
+		}}
+}
+
+// mailNickname is a group's mailNickname from its name: the characters
+// Graph takes, or "group" when none is left.
+// ponytail: not unique; a security group's needn't be.
+func mailNickname(name string) string {
+	nick := strings.Map(func(r rune) rune {
+		if r < 128 && (r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("._-", r)) {
+			return r
+		}
+		return -1
+	}, name)
+	return cmp.Or(nick[:min(len(nick), 64)], "group") // Graph takes up to 64
+}
+
+// entraEdit is entra_user or entra_group edit (entra-objects): allowlisted
+// properties of one object set in one PATCH, an empty value clearing one.
+// On a synced object only those sync never writes are allowed.
+func entraEdit(k entraKind) entraAction {
+	tool, perms := "entra_group", []string{"Group.ReadWrite.All", "Directory.ReadWrite.All"}
+	if k.path == entraUsers.path {
+		tool, perms = "entra_user", []string{"User.ReadWrite.All", "Directory.ReadWrite.All"}
+	}
+	return entraAction{Action{Name: "edit", Perms: perms, Capabilities: []string{"entra-objects"}},
+		func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
+			if len(in.Properties) == 0 {
+				return nil, errors.New("edit needs properties")
+			}
+			body := map[string]any{}
+			for p, v := range in.Properties {
+				body[p] = v
+				if v == "" && strings.EqualFold(p, "displayName") {
+					return nil, errors.New("displayName can't be cleared, only changed")
+				}
+				if v == "" {
+					body[p] = nil
+				}
+			}
+			return d.entraWrite(ctx, entraWrite{tool: tool, action: "edit", kind: k, id: in.ID, in: in.writeIn, raw: true,
+				method: http.MethodPatch, body: body})
+		}}
+}
+
+// entraManager is entra_user set_manager or remove_manager (entra-objects).
+func entraManager(action string) entraAction {
+	return entraAction{Action{Name: action, Perms: []string{"User.ReadWrite.All", "Directory.ReadWrite.All"}, Capabilities: []string{"entra-objects"}},
+		func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
+			w := entraWrite{tool: "entra_user", action: action, kind: entraUsers, id: in.ID, in: in.writeIn,
+				method: http.MethodDelete, rels: []string{"/manager/$ref"}}
+			if action == "set_manager" {
+				if !objectID.MatchString(in.Manager) {
+					return nil, fmt.Errorf("manager %q: want the manager's object id (GUID)", in.Manager)
+				}
+				w.method, w.body = http.MethodPut, map[string]any{"@odata.id": d.Graph.URL("/v1.0/users/" + in.Manager)}
+			}
+			out, err := d.entraWrite(ctx, w)
+			if err != nil {
+				return nil, err
+			}
+			out["manager"] = in.Manager
+			return out, nil
+		}}
+}
+
+// entraDelete is the delete action (entra-delete) of the entra_* tool of
+// k: one object, with confirm.
+func entraDelete(k entraKind) entraAction {
+	tool, perms := "entra_user", []string{"User.DeleteRestore.All", "User.ReadWrite.All", "Directory.ReadWrite.All"}
+	switch k.path {
+	case entraGroups.path:
+		tool, perms = "entra_group", []string{"Group.ReadWrite.All", "Directory.ReadWrite.All"}
+	case entraDevices.path:
+		tool, perms = "entra_device", []string{"Device.ReadWrite.All", "Directory.ReadWrite.All"}
+	}
+	return entraAction{Action{Name: "delete", Perms: perms, Capabilities: []string{"entra-delete"}},
+		func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
+			return d.entraWrite(ctx, entraWrite{tool: tool, action: "delete", kind: k, id: in.ID, in: in.writeIn, confirm: true, method: http.MethodDelete})
+		}}
+}
+
+// entraRestore is entra_user or entra_group restore (entra-delete): one
+// deleted object, by its id, from directory/deletedItems.
+func entraRestore(k entraKind) entraAction {
+	tool, perms := "entra_group", []string{"Group.ReadWrite.All", "Directory.ReadWrite.All"}
+	if k.path == entraUsers.path {
+		tool, perms = "entra_user", []string{"User.DeleteRestore.All", "User.ReadWrite.All", "Directory.ReadWrite.All"}
+	}
+	return entraAction{Action{Name: "restore", Perms: perms, Capabilities: []string{"entra-delete"}},
+		func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
+			return d.entraWrite(ctx, entraWrite{tool: tool, action: "restore", kind: entraDeleted, id: in.ID, in: in.writeIn,
+				method: http.MethodPost, rels: []string{"/restore"}, typ: k.typ})
+		}}
+}
+
+// entraObjectsDoc describes the entra-objects and entra-delete actions of
+// the tool for col that show.
+func entraObjectsDoc(col string, visible []string) []string {
+	var says []string
+	if slices.Contains(visible, "create") {
+		what := "a security group (never mail-enabled or role-assignable) named name"
+		if col == "users" {
+			what = "a cloud user named name with upn, enabled, with a password the server generates, returned once in the reply and " +
+				"never logged, which the user must change at next sign-in"
+		}
+		says = append(says, "create makes "+what+"; never retried, so on a lost reply search before trying again (entra-objects)")
+	}
+	if slices.Contains(visible, "edit") {
+		says = append(says, "edit sets properties (an empty value clears one), only these: "+strings.Join(entraObjectProps[col], ", ")+
+			"; create may set them too (entra-objects)")
+	}
+	if slices.Contains(visible, "set_manager") {
+		says = append(says, "set_manager sets the user's manager to manager, remove_manager removes it (entra-objects)")
+	}
+	if slices.Contains(visible, "delete") {
+		kept := "kept 30 days in deleted items"
+		if col == "groups" {
+			kept = "a security group for good, a Microsoft 365 group kept 30 days in deleted items"
+		}
+		says = append(says, "delete deletes it, with confirm: "+kept+" (entra-delete)")
+	}
+	if slices.Contains(visible, "restore") {
+		says = append(says, "restore brings back a deleted one by its id, from entra_api get /v1.0/directory/deletedItems/microsoft.graph."+
+			strings.TrimSuffix(col, "s")+" (entra-delete)")
+	}
+	return says
+}
+
+// entraGroupDoc describes the entra_group writes that show, or is "" when
+// none does.
 func entraGroupDoc(visible []string) string {
-	if !slices.Contains(visible, "add_members") {
+	var says []string
+	if slices.Contains(visible, "add_members") {
+		says = append(says, "add_members and remove_members take members, 1 to 20 object ids (users, groups, devices). An add is one call: if any "+
+			"member is already in, Graph refuses it whole. A remove of one already out is no error. Protected members (directory role holders, "+
+			"members and owners of role-assignable groups) are refused (entra-group-membership)")
+	}
+	says = append(says, entraObjectsDoc("groups", visible)...)
+	if len(says) == 0 {
 		return ""
 	}
-	return "\n\nWrites (the entra-group-membership capability), one group by object id, with a reason for the audit log: " +
-		"add_members and remove_members take members, 1 to 20 object ids (users, groups, devices). An add is one call: if any " +
-		"member is already in, Graph refuses it whole. A remove of one already out is no error. Role-assignable groups and protected members (directory role holders, members and owners of " +
-		"role-assignable groups) are refused; a group synced from the forest is refused and names the ad_group action and AD counterpart."
+	return "\n\nWrites, one group by object id (create: none), with a reason for the audit log: " + strings.Join(says, "; ") +
+		". Role-assignable groups are refused; on a group synced from the forest, every write but restore is refused and names " +
+		"the ad_* action and AD counterpart."
+}
+
+// entraDeviceDoc describes delete when it shows.
+func entraDeviceDoc(visible []string) string {
+	if !slices.Contains(visible, "delete") {
+		return ""
+	}
+	return "\n\ndelete (the entra-delete capability): one device by object id, with confirm (its displayName) and a reason for " +
+		"the audit log. A deleted device can't be restored. A device synced from the forest is refused and names ad_object delete and the AD counterpart."
 }
 
 // entraUserDoc describes the entra_user writes that show, or is "" when
@@ -506,13 +754,15 @@ func entraUserDoc(visible []string) string {
 	if slices.Contains(visible, "delete_auth_method") {
 		says = append(says, "delete_auth_method deletes one authentication method by method_id, from auth_methods (entra-credentials)")
 	}
+	says = append(says, entraObjectsDoc("users", visible)...)
 	if len(says) == 0 {
 		return ""
 	}
-	return "\n\nWrites, one user by id, with a reason for the audit log: " + strings.Join(says, "; ") +
+	return "\n\nWrites, one user by id (create: none), with a reason for the audit log: " + strings.Join(says, "; ") +
 		". Protected targets (directory role holders, members and owners of role-assignable groups) are refused. On a user synced " +
-		"from the forest, disable and enable are refused and name the ad_user action and AD counterpart, and so is reset_password " +
-		"unless the operator declares password writeback on; the rest are allowed."
+		"from the forest, disable, enable, edit (but for " + strings.Join(entraCloudProps, ", ") + "), set_manager, remove_manager and delete " +
+		"are refused and name the ad_* action and AD counterpart, and so is reset_password unless the operator declares password " +
+		"writeback on; the rest are allowed."
 }
 
 // entraCapabilities are the Entra side's capabilities.
