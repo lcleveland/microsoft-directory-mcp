@@ -14,7 +14,8 @@
 #                            a synced user whose SID is vmuser042's, read from
 #                            /var/lib/samba-dc/vm-synced-sid (onPremisesSyncBehavior refused: 403)
 #                            PATCH of a user's accountEnabled, passwordProfile or other properties; POST
-#                            of a cloud user, its DELETE and restore from deletedItems; empty role
+#                            of a cloud user, its DELETE and restore from deletedItems; the synced
+#                            user's assignLicense; empty role
 #                            assignments, memberships and ownerships; every write recorded in /tmp/stub-writes
 #   microsoft-directory-mcp  the module's HTTP service
 #
@@ -192,7 +193,11 @@ let
             sid = fh.read().strip()
         return {"@odata.type": "#microsoft.graph.user", "id": "00000000-0000-0000-0000-000000000109",
                 "displayName": "Synced User", "userPrincipalName": "synced-user@example.com", "accountEnabled": True,
-                "onPremisesSyncEnabled": True, "onPremisesSecurityIdentifier": sid}
+                "onPremisesSyncEnabled": True, "onPremisesSecurityIdentifier": sid, "assignedLicenses": SYNCED_LICENSES}
+
+
+    # The synced user's licences, set by assignLicense.
+    SYNCED_LICENSES = []
 
 
     # A group of user 1 and the device.
@@ -346,6 +351,16 @@ let
         h.error(404, "Request_ResourceNotFound", key)
 
 
+    def assign_license(h, query, key):
+        """Adds and removes licences of the synced user, the one user the VM licenses."""
+        body = json.loads(h.body())
+        if key != synced()["id"]:
+            return h.error(404, "Request_ResourceNotFound", key)
+        SYNCED_LICENSES[:] = [x for x in SYNCED_LICENSES if x["skuId"] not in body["removeLicenses"]] + \
+            [{"skuId": x["skuId"]} for x in body["addLicenses"]]
+        h.reply(200, synced())
+
+
     def deleted_item(h, query, key):
         if key not in DELETED:
             return h.error(404, "Request_ResourceNotFound", key)
@@ -394,6 +409,7 @@ let
         ("GET", re.compile(r"/v1\.0/users/([^/]+)"), user),
         ("PATCH", re.compile(r"/v1\.0/users/([^/]+)"), user_patch),
         ("DELETE", re.compile(r"/v1\.0/users/([^/]+)"), user_delete),
+        ("POST", re.compile(r"/v1\.0/users/([^/]+)/assignLicense"), assign_license),
         ("GET", re.compile(r"/v1\.0/directory/deletedItems/([^/]+)"), deleted_item),
         ("POST", re.compile(r"/v1\.0/directory/deletedItems/([^/]+)/restore"), restore),
         ("GET", re.compile(r"/v1\.0/users/([^/]+)/(?:transitiveMemberOf|ownedObjects)"), none),
@@ -689,10 +705,12 @@ let
     assert [a["initiatedBy"]["user"]["userPrincipalName"] for a in added] == ["admin@example.com"], added
 
     # Writes: the server runs with --capabilities ad-account-state,ad-passwords,ad-group-membership,ad-objects,ad-delete,
-    # ad-gpo-links,ad-password-policy,entra-account-state,entra-credentials,entra-group-membership,entra-objects,entra-delete.
+    # ad-gpo-links,ad-password-policy,entra-account-state,entra-credentials,entra-group-membership,entra-objects,entra-delete,
+    # entra-licenses.
     assert ad["enabled_capabilities"] == ["ad-account-state", "ad-passwords", "ad-group-membership", "ad-objects", "ad-delete",
                                           "ad-gpo-links", "ad-password-policy"], ad
-    assert entra["enabled_capabilities"] == ["entra-account-state", "entra-credentials", "entra-group-membership", "entra-objects", "entra-delete"], entra
+    assert entra["enabled_capabilities"] == ["entra-account-state", "entra-credentials", "entra-group-membership", "entra-objects", "entra-delete",
+                                             "entra-licenses"], entra
     api = next(t for t in listed["result"]["tools"] if t["name"] == "ad_api")
     assert api["inputSchema"]["properties"]["action"]["enum"] == ["search", "modify", "add", "delete", "rename"], api
     user = next(t for t in listed["result"]["tools"] if t["name"] == "ad_user")
@@ -839,6 +857,16 @@ let
     w = call("entra_user", {"action": "restore", "id": new, "reason": "vm-test entra restore"})
     assert w["endpoint"] == "POST /v1.0/directory/deletedItems/" + new + "/restore" and w["name"] == "vm-entra-new@example.com", w
     assert call("entra_user", {"action": "get", "id": new})["department"] == "QA"
+
+    # entra-licenses: a licence is assigned to the synced user and removed; licences are Entra's even on a synced user.
+    sku = "00000000-0000-0000-0000-0000000000c1"
+    w = call("entra_user", {"action": "assign_license", "id": synced["id"], "skus": [sku], "reason": "vm-test entra assign"})
+    assert w["endpoint"] == "POST /v1.0/users/" + synced["id"] + "/assignLicense" and w["skus"] == [sku], w
+    lic = call("entra_user", {"action": "licenses", "id": synced["id"]})
+    print("entra_user licenses synced", json.dumps(lic))
+    assert [x["skuPartNumber"] for x in lic["assignedLicenses"]] == ["EXCHANGESTANDARD"], lic
+    call("entra_user", {"action": "remove_license", "id": synced["id"], "skus": [sku], "reason": "vm-test entra remove"})
+    assert call("entra_user", {"action": "licenses", "id": synced["id"]})["assignedLicenses"] == []
     print("ok")
   '';
 
@@ -999,7 +1027,7 @@ pkgs.testers.runNixOSTest {
         logLevel = "debug";
         extraArgs = [
           "--capabilities"
-          "ad-account-state,ad-passwords,ad-group-membership,ad-objects,ad-delete,ad-gpo-links,ad-password-policy,entra-account-state,entra-credentials,entra-group-membership,entra-objects,entra-delete"
+          "ad-account-state,ad-passwords,ad-group-membership,ad-objects,ad-delete,ad-gpo-links,ad-password-policy,entra-account-state,entra-credentials,entra-group-membership,entra-objects,entra-delete,entra-licenses"
         ];
         http.authTokenFile = "/run/mcp-bearer";
         ad = {
@@ -1100,13 +1128,17 @@ pkgs.testers.runNixOSTest {
                             ("entra restore", "entra-delete")):
             assert any(f'reason="vm-test {reason}"' in x and "outcome=ok" in x and f"capability={cap}" in x
                        for x in journal.splitlines()), reason
+        for reason in ("entra assign", "entra remove"):
+            assert any(f'reason="vm-test {reason}"' in x and "outcome=ok" in x and "capability=entra-licenses" in x
+                       for x in journal.splitlines()), reason
         for reason in ("entra edit synced", "entra delete mismatch"):
             assert any(f'reason="vm-test {reason}"' in x and 'outcome="not sent"' in x for x in journal.splitlines()), reason
 
-    with subtest("the stub recorded the cloud users' writes and no write to the synced user"):
+    with subtest("the stub recorded the cloud users' writes, and to the synced user only its licences"):
         writes = machine.succeed("cat /tmp/stub-writes").splitlines()
         new = "/v1.0/users/00000000-0000-0000-0000-000000000110"
         assert writes == ["PATCH /v1.0/users/entra-user3@example.com", "PATCH /v1.0/users/entra-user2@example.com", "POST /v1.0/users",
-                          "PATCH " + new, "DELETE " + new, "POST /v1.0/directory/deletedItems/00000000-0000-0000-0000-000000000110/restore"], writes
+                          "PATCH " + new, "DELETE " + new, "POST /v1.0/directory/deletedItems/00000000-0000-0000-0000-000000000110/restore"] + \
+            ["POST /v1.0/users/00000000-0000-0000-0000-000000000109/assignLicense"] * 2, writes
   '';
 }

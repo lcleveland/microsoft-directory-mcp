@@ -147,6 +147,7 @@ type entraWrite struct {
 	confirm      bool // in.Confirm must be the target's userPrincipalName, or displayName
 	method       string
 	rels         []string // none: the object itself
+	at           string   // the one call's path in place of rels, when it is not under the object
 	body         map[string]any
 	check        func(context.Context) error // more refusals, after the target's
 	reply        any                         // decodes the last call's reply
@@ -174,6 +175,9 @@ func (d Deps) entraWrite(ctx context.Context, w entraWrite) (map[string]any, err
 	var paths []string
 	for _, rel := range rels {
 		paths = append(paths, base+rel)
+	}
+	if w.at != "" {
+		paths = []string{w.at}
 	}
 	endpoint := w.method + " " + strings.Join(paths, ", ")
 	audit := []any{"tool", w.tool, "action", w.action, "target", w.id, "endpoint", endpoint, "reason", reason}
@@ -511,6 +515,65 @@ func entraMembership(action string) entraAction {
 		}}
 }
 
+// entraLicense is entra_user assign_license or remove_license (one
+// assignLicense call of 1 to 20 SKUs) or reprocess_licenses
+// (reprocessLicenseAssignment), entra-licenses. Allowed on synced users.
+func entraLicense(action string) entraAction {
+	return entraAction{Action{Name: action, Capabilities: []string{"entra-licenses"},
+		Perms: []string{"LicenseAssignment.ReadWrite.All", "User.ReadWrite.All", "Directory.ReadWrite.All"}},
+		func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
+			w := entraWrite{tool: "entra_user", action: action, kind: entraUsers, id: in.ID, in: in.writeIn, method: http.MethodPost}
+			if action == "reprocess_licenses" {
+				w.rels, w.body = []string{"/reprocessLicenseAssignment"}, map[string]any{}
+				return d.entraWrite(ctx, w)
+			}
+			if n := len(in.Skus); n == 0 || n > maxMembers {
+				return nil, fmt.Errorf("%s takes 1 to %d skus, got %d: call again for more", action, maxMembers, n)
+			}
+			add, remove := []any{}, []string{}
+			for _, s := range in.Skus {
+				if !objectID.MatchString(s) {
+					return nil, fmt.Errorf("sku %q: want a skuId (GUID), from entra_license skus", s)
+				}
+				if action == "assign_license" {
+					add = append(add, map[string]any{"skuId": s, "disabledPlans": []string{}})
+				} else {
+					remove = append(remove, s)
+				}
+			}
+			w.rels, w.body = []string{"/assignLicense"}, map[string]any{"addLicenses": add, "removeLicenses": remove}
+			out, err := d.entraWrite(ctx, w)
+			if err != nil {
+				return nil, err
+			}
+			out["skus"] = in.Skus
+			return out, nil
+		}}
+}
+
+// entraDeviceState is entra_device disable or enable (entra-devices).
+func entraDeviceState(action string) entraAction {
+	return entraAction{Action{Name: action, Perms: []string{"Device.ReadWrite.All", "Directory.ReadWrite.All"}, Capabilities: []string{"entra-devices"}},
+		func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
+			return d.entraWrite(ctx, entraWrite{tool: "entra_device", action: action, kind: entraDevices, id: in.ID, in: in.writeIn,
+				method: http.MethodPatch, body: map[string]any{"accountEnabled": action == "enable"}})
+		}}
+}
+
+// entraRiskAction is entra_risk dismiss or confirm_compromised
+// (entra-risk): one risky user, by object id. Allowed on synced users.
+func entraRiskAction(action string) entraAction {
+	op := map[string]string{"dismiss": "dismiss", "confirm_compromised": "confirmCompromised"}[action]
+	return entraAction{Action{Name: action, Perms: []string{"IdentityRiskyUser.ReadWrite.All"}, Licence: "P2", Capabilities: []string{"entra-risk"}},
+		func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
+			if !objectID.MatchString(in.ID) {
+				return nil, fmt.Errorf("id %q: want the user's object id (GUID), from risky_users", in.ID)
+			}
+			return d.entraWrite(ctx, entraWrite{tool: "entra_risk", action: action, kind: entraUsers, id: in.ID, in: in.writeIn,
+				method: http.MethodPost, at: "/v1.0/identityProtection/riskyUsers/" + op, body: map[string]any{"userIds": []string{in.ID}}})
+		}}
+}
+
 // entraCreate is entra_user or entra_group create (entra-objects): one
 // cloud object in one POST, with allowlisted properties. A user gets a
 // generated password, returned once, which it must change, and is enabled;
@@ -725,13 +788,31 @@ func entraGroupDoc(visible []string) string {
 		"the ad_* action and AD counterpart."
 }
 
-// entraDeviceDoc describes delete when it shows.
+// entraDeviceDoc describes the entra_device writes that show, or is "" when
+// none does.
 func entraDeviceDoc(visible []string) string {
-	if !slices.Contains(visible, "delete") {
+	var says []string
+	if slices.Contains(visible, "disable") {
+		says = append(says, "disable and enable set accountEnabled (entra-devices)")
+	}
+	if slices.Contains(visible, "delete") {
+		says = append(says, "delete deletes it, with confirm (its displayName); a deleted device can't be restored, and a synced one names ad_object delete (entra-delete)")
+	}
+	if len(says) == 0 {
 		return ""
 	}
-	return "\n\ndelete (the entra-delete capability): one device by object id, with confirm (its displayName) and a reason for " +
-		"the audit log. A deleted device can't be restored. A device synced from the forest is refused and names ad_object delete and the AD counterpart."
+	return "\n\nWrites, one device by object id, with a reason for the audit log: " + strings.Join(says, "; ") +
+		". A device synced from the forest is refused and names the ad_* action and AD counterpart."
+}
+
+// entraRiskDoc describes the entra_risk writes when they show.
+func entraRiskDoc(visible []string) string {
+	if !slices.Contains(visible, "dismiss") && !slices.Contains(visible, "confirm_compromised") {
+		return ""
+	}
+	return "\n\nWrites (the entra-risk capability), one user by object id (id from risky_users), with a reason for the audit log: " +
+		"dismiss dismisses the user's risk; confirm_compromised marks the user compromised, raising risk to high so risk policies act. " +
+		"Allowed on users synced from the forest; protected targets (directory role holders, members and owners of role-assignable groups) are refused."
 }
 
 // entraUserDoc describes the entra_user writes that show, or is "" when
@@ -755,6 +836,10 @@ func entraUserDoc(visible []string) string {
 		says = append(says, "delete_auth_method deletes one authentication method by method_id, from auth_methods (entra-credentials)")
 	}
 	says = append(says, entraObjectsDoc("users", visible)...)
+	if slices.Contains(visible, "assign_license") {
+		says = append(says, "assign_license and remove_license assign or remove skus, 1 to 20 skuIds from entra_license skus, in one call "+
+			"(assigning needs the user's usageLocation set); reprocess_licenses reprocesses group-based licences (entra-licenses)")
+	}
 	if len(says) == 0 {
 		return ""
 	}

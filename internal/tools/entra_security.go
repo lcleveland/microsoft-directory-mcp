@@ -126,14 +126,15 @@ func init() {
 			entraAction{Action{Name: "search", Perms: auditRead, Licence: "P1"}, entraSignIns.search},
 		),
 		entraTool("entra_risk", "security", "Entra ID Identity Protection",
-			"Identity Protection, read only; needs P2. risky_users: users at risk as briefs (id, userPrincipalName, "+
+			"Identity Protection; needs P2. risky_users: users at risk as briefs (id, userPrincipalName, "+
 				"riskLevel, riskState, riskLastUpdatedDateTime); filter e.g. riskState eq 'atRisk'. risk_detections: risk "+
 				"events as briefs (id, detectedDateTime, riskEventType, riskLevel, riskState, userPrincipalName, ipAddress, "+
 				"location); filter on userId, riskEventType or detectedDateTime. Graph allows Identity Protection about 1 "+
 				"request per second per tenant, shared by every app; keep filters narrow.",
-			nil,
+			entraRiskDoc,
 			entraAction{Action{Name: "risky_users", Perms: []string{"IdentityRiskyUser.Read.All", "IdentityRiskyUser.ReadWrite.All"}, Licence: "P2"}, entraRiskyUsers.search},
 			entraAction{Action{Name: "risk_detections", Perms: []string{"IdentityRiskEvent.Read.All"}, Licence: "P2"}, entraRiskDetections.search},
+			entraRiskAction("confirm_compromised"), entraRiskAction("dismiss"),
 		),
 		entraTool("entra_policy", "policy", "Entra ID policies",
 			"Tenant policies, read only. conditional_access: Conditional Access policies as briefs (id, displayName, "+
