@@ -58,6 +58,10 @@ _Avoid_: master, owner, origin
 A named class of write the operator opts into; writes outside an enabled capability do not exist for the client.
 _Avoid_: permission, verb flag
 
+**Protected target**:
+An object the server never writes, whatever capabilities are enabled: a tier-0 object in the forest, or a user holding an admin role (or in a role-assignable group) in the tenant.
+_Avoid_: privileged object, admin object, tier-0 (alone)
+
 **Tool group**:
 A named set of tools the operator can enable or disable together.
 _Avoid_: module, feature, category
