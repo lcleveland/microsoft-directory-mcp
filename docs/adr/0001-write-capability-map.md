@@ -26,6 +26,8 @@ As a result the service principal only ever needs User Administrator, never Priv
 
 **Raw tools never bypass the rails.** In `ad_api` and `entra_api`, a write that a first-class action covers is refused and pointed to that action. Raw writes are left with `ad-objects` allowlisted attribute edits on a user, group or computer (an `ad_api` modify; OUs, contacts and other classes are refused), and `entra-objects` allowlisted property edits on a user or group (an `entra_api` PATCH). Every other raw write is refused.
 
+The `entra-objects` allowlist is descriptive properties only, but Entra dynamic-group rules can key on them (department, jobTitle, companyName, employeeType, city, country, …). So enabling `entra-objects` can change dynamic-group membership, and with it group-gated access. We accept that rather than shrink the allowlist; operators weigh it when turning the capability on.
+
 **Never exposed:**
 - **AD:** other UAC bits, SPNs, key credentials, RBCD, sIDHistory, ACLs, cross-domain moves, tree delete, AdminSDHolder, dSHeuristics, GPO creation and content, schema and config, trusts, MachineAccountQuota.
 - **Entra:** CA, named locations, the auth-methods policy, security defaults, role assignments and PIM, app and SP creation and credentials, consent grants, and source-of-authority conversion.
