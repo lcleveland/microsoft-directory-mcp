@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -489,6 +490,12 @@ func (d Deps) psoCreate(ctx context.Context, in adPolicyIn) (map[string]any, err
 func (d Deps) psoWrite(ctx context.Context, in adPolicyIn) (map[string]any, error) {
 	if n := len(in.AppliesTo); in.Action != "edit" && (n == 0 || n > maxMembers) {
 		return nil, fmt.Errorf("%s takes 1 to %d applies_to, got %d: call again for more", in.Action, maxMembers, n)
+	}
+	// Settings only: what a PSO applies to changes through apply, which checks its targets.
+	for _, k := range slices.Sorted(maps.Keys(in.Attributes)) {
+		if err := allowed(psoSettings, psoClass, k); err != nil {
+			return nil, fmt.Errorf("%w; ad_policy apply and unapply change msDS-PSOAppliesTo", err)
+		}
 	}
 	var dns []string
 	w := adWrite{tool: "ad_policy", action: in.Action, id: in.ID, class: adPSOs.class, in: in.writeIn, attrs: []string{"msDS-PSOAppliesTo"}}
