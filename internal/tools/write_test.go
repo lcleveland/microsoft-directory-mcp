@@ -18,6 +18,12 @@ import (
 	"github.com/lcleveland/microsoft-directory-mcp/internal/config"
 )
 
+func TestInetOrgPersonEditable(t *testing.T) {
+	if c, err := classifyAD("modify", "title", "inetOrgPerson", true); err != nil || c != "ad-objects" {
+		t.Errorf("got %q, %v", c, err)
+	}
+}
+
 func TestClassifyAD(t *testing.T) {
 	old := adObjectAttrs
 	adObjectAttrs = map[string][]string{"user": {"description"}}
@@ -72,12 +78,13 @@ func writeDeps(t *testing.T, e *ldap.Entry, caps ...string) (Deps, *bytes.Buffer
 	}
 	var sent []any
 	old, oldA := adModify, adAdd
-	adModify = func(_ *ad.Client, _ context.Context, dn, _ string, _ []string, vet func(*ldap.Entry) (any, error)) (ad.Target, error) {
+	adModify = func(_ *ad.Client, _ context.Context, dn, _ string, _ []string, vet func(*ldap.Entry) (any, error), sending func()) (ad.Target, error) {
 		if !strings.EqualFold(dn, e.DN) {
 			t.Errorf("wrote %s, want %s", dn, e.DN)
 		}
 		req, err := vet(e)
 		if err == nil {
+			sending()
 			sent = append(sent, req)
 		}
 		return ad.Target{DC: "dc2.corp.example.com:636"}, err

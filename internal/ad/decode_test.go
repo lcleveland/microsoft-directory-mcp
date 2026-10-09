@@ -42,6 +42,9 @@ func TestDecode(t *testing.T) {
 		"intervals": {map[string][]string{"maxPwdAge": {"-36288000000000"}, "lockoutDuration": {"-18000000000"},
 			"lockOutObservationWindow": {"-9223372036854775808"}}, nil,
 			`{"dn":"CN=u,DC=corp,DC=example,DC=com","lockOutObservationWindow":null,"lockoutDuration":"PT30M","maxPwdAge":"P42D"}`},
+		// A million days: past what a time.Duration holds.
+		"long interval": {map[string][]string{"msDS-MaximumPasswordAge": {"-864000000000000000"}}, nil,
+			`{"dn":"CN=u,DC=corp,DC=example,DC=com","msDS-MaximumPasswordAge":"P1000000D"}`},
 		"uac disabled": {map[string][]string{"userAccountControl": {"66050"}}, nil,
 			`{"dn":"CN=u,DC=corp,DC=example,DC=com","enabled":false,"userAccountControl":["ACCOUNTDISABLE","NORMAL_ACCOUNT","DONT_EXPIRE_PASSWORD"]}`},
 		"uac enabled": {map[string][]string{"userAccountControl": {"4096"}}, nil,

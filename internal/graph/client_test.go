@@ -120,6 +120,7 @@ func TestNewRejectsBadPEM(t *testing.T) {
 type stub struct {
 	tokens, calls atomic.Int32
 	reject        atomic.Int32 // Graph 401s still to send
+	throttle      atomic.Int32 // then Graph 429s still to send
 	form          chan map[string][]string
 }
 
@@ -145,6 +146,12 @@ func (s *stub) server(t *testing.T) *httptest.Server {
 			s.reject.Add(-1)
 			w.WriteHeader(http.StatusUnauthorized)
 			io.WriteString(w, `{"error":{"code":"InvalidAuthenticationToken","message":"expired"}}`)
+			return
+		}
+		if s.throttle.Load() > 0 {
+			s.throttle.Add(-1)
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
 			return
 		}
 		if r.Header.Get("Authorization") != "Bearer tok-"+string(rune('0'+s.tokens.Load())) {
@@ -236,5 +243,19 @@ func TestRefetchOnceOn401(t *testing.T) {
 	err := c.Get(context.Background(), "/v1.0/organization", &out)
 	if err == nil || !strings.Contains(err.Error(), "InvalidAuthenticationToken") || s.calls.Load() != 4 {
 		t.Errorf("err %v calls %d", err, s.calls.Load())
+	}
+}
+
+func TestNoRefetchOn429After401(t *testing.T) {
+	s := &stub{}
+	ts := s.server(t)
+	c := newClient(t, ts.URL, ts.URL)
+	s.reject.Store(1)
+	s.throttle.Store(2)
+	if err := c.Get(context.Background(), "/v1.0/organization", nil); err != nil {
+		t.Fatal(err)
+	}
+	if s.tokens.Load() != 2 || s.calls.Load() != 4 {
+		t.Errorf("tokens %d calls %d, want 2 and 4", s.tokens.Load(), s.calls.Load())
 	}
 }

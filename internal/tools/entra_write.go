@@ -401,7 +401,7 @@ var entraResetPassword = entraAction{Action{Name: "reset_password", Capabilities
 			confirm: true, method: http.MethodPatch,
 			body: map[string]any{"passwordProfile": map[string]any{"password": string(pw), "forceChangePasswordNextSignIn": must}}})
 		if err != nil {
-			return nil, err
+			return nil, lostReset(err)
 		}
 		out["password"], out["must_change"] = string(pw), must
 		return out, nil

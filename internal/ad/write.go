@@ -35,8 +35,9 @@ var (
 // attrs; deleted objects too, for a restore) and refuses a protected
 // target; then vet checks the entry and builds the request, a modify,
 // delete or modify DN of it, which is sent once. Nothing is sent when vet
-// errs.
-func (c *Client) Modify(ctx context.Context, dn, class string, attrs []string, vet func(*ldap.Entry) (any, error)) (Target, error) {
+// errs. sending, if not nil, is called once nothing is left to refuse,
+// just before the request is sent.
+func (c *Client) Modify(ctx context.Context, dn, class string, attrs []string, vet func(*ldap.Entry) (any, error), sending func()) (Target, error) {
 	d, err := c.DomainOf(ctx, dn)
 	if err != nil {
 		return Target{}, err
@@ -71,6 +72,9 @@ func (c *Client) Modify(ctx context.Context, dn, class string, attrs []string, v
 			if to.DN != d.DN {
 				return fmt.Errorf("%s is in %s and %s in %s: cross-domain moves are never made", e.DN, d.DNS, r.NewSuperior, to.DNS)
 			}
+		}
+		if sending != nil {
+			sending()
 		}
 		return send(conn, req)
 	})

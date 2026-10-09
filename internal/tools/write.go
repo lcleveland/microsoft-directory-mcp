@@ -6,9 +6,11 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"maps"
 	"math/big"
+	"net"
 	"slices"
 	"strconv"
 	"strings"
@@ -71,7 +73,7 @@ var adObjectAttrs = map[string][]string{
 	"computer": {"description", "location"},
 }
 
-func init() { adObjectAttrs["inetOrgPerson"] = adObjectAttrs["user"] } // a user too
+func init() { adObjectAttrs["inetorgperson"] = adObjectAttrs["user"] } // a user too; keys are lower case
 
 // adEditable is the class filter of the objects ad_object writes.
 const adEditable = "(|(objectClass=user)(objectClass=group))"
@@ -191,10 +193,11 @@ func (d Deps) adWrite(ctx context.Context, w adWrite) (map[string]any, error) {
 		slices.Sort(names)
 		// Attribute names only: values (passwords among them) are never logged.
 		audit = append(audit, "capability", strings.Join(slices.Compact(caps), ","), "attributes", slices.Compact(names))
+		return req, nil
+	}, func() {
 		// Logged before sending too, so a write cut off mid-call still has a record.
 		d.log().Info("ad write", append(audit, "outcome", "sending")...)
 		sent = true
-		return req, nil
 	})
 	audit = append(audit, "dc", tgt.DC, "fallback", tgt.Fallback)
 	if err != nil {
@@ -319,11 +322,23 @@ var resetPassword = adExtra{Action: Action{Name: "reset_password", Capabilities:
 			return ch, nil
 		}})
 	if err != nil {
-		return nil, err
+		return nil, lostReset(err)
 	}
 	out["password"], out["must_change"] = string(pw), must
 	return out, nil
 }}
+
+// lostReset is err from a password reset, saying so when the reply may
+// have been lost after the reset was sent (a network error or timeout,
+// not an answer): the password may then already be set.
+func lostReset(err error) error {
+	var ne net.Error
+	if ldap.IsErrorWithCode(err, ldap.ErrorNetwork) || errors.As(err, &ne) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return fmt.Errorf("%w; if the reset was sent before the reply was lost, the password is already set to one nobody has: reset again rather than assume nothing changed", err)
+	}
+	return err
+}
 
 // unicodePwd is the value that sets pw: the password in quotes, as
 // UTF-16LE; generated passwords are ASCII.
