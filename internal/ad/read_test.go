@@ -53,6 +53,12 @@ func TestResolve(t *testing.T) {
 			t.Errorf("%s: want %s, got %q %v", id, want, got, err)
 		}
 	}
+	// A GPO's GUID is its name, not its objectGUID.
+	gpo := "CN={31B2F340-016D-11D2-945F-00C04FB984F9},CN=Policies,CN=System," + corpDN
+	f.tree[strings.ToLower(gpo)] = map[string][]string{"objectClass": {"groupPolicyContainer"}, "cn": {"{31B2F340-016D-11D2-945F-00C04FB984F9}"}}
+	if got, err := c.Resolve(ctx, "31b2f340-016d-11d2-945f-00c04fb984f9", "(objectClass=groupPolicyContainer)"); err != nil || !strings.EqualFold(got, gpo) {
+		t.Errorf("gpo by GUID: %q %v", got, err)
+	}
 	// A sAMAccountName in two domains names each DN.
 	_, err := c.Resolve(ctx, "jdoe", userClass)
 	if err == nil || !strings.Contains(err.Error(), strings.ToLower(jdoeCorp)) || !strings.Contains(err.Error(), strings.ToLower(jdoeChild)) {

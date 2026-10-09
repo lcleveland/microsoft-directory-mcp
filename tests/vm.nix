@@ -2,7 +2,7 @@
 # one node with three units (docs/research/vm-test-stubs.md):
 #
 #   samba-dc                 Samba AD DC, provisioned in preStart; LDAPS with
-#                            Samba's auto-generated CA
+#                            a CA and certificate made there by openssl
 #   stub-graph               stdlib Python Graph: v2.0 token endpoint that
 #                            verifies the client assertion and issues a JWT
 #                            with a roles claim; /organization, and the probe's
@@ -28,6 +28,8 @@ let
   clientId = "00000000-0000-0000-0000-0000000000bb";
   httpToken = "mcp-http-bearer";
   smbConf = "/var/lib/samba-dc/etc/smb.conf";
+  tlsDir = "/var/lib/samba-dc/vm-tls";
+  openssl = lib.getExe pkgs.openssl;
   # The certificate half of the Entra fixture, readable by the stub.
   certPublic = "/run/entra-cert-public.pem";
   # An unsigned JWT the server decodes for the startup probe. Payload:
@@ -35,9 +37,24 @@ let
   accessToken = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJhdWQiOiJodHRwczovL2dyYXBoLm1pY3Jvc29mdC5jb20iLCJyb2xlcyI6WyJPcmdhbml6YXRpb24uUmVhZC5BbGwiLCJVc2VyLlJlYWQuQWxsIiwiTGljZW5zZUFzc2lnbm1lbnQuUmVhZC5BbGwiXX0.stub";
 
   # Seed data, ldbadd-ed into sam.ldb at provisioning: 250 users (more than
-  # one page), vm-team with five users and the nested vm-sub (two more).
+  # one page), vm-team with five users and the nested vm-sub (two more);
+  # GPOs a and b linked to OU=vm-ou (b enforced, link order 1), and
+  # OU=vm-child under it blocking inheritance. The PSO vm-pso, applied to
+  # vm-team, is created with samba-tool after.
   base = "DC=corp,DC=example,DC=com";
   userDN = n: "CN=vmuser${lib.fixedWidthNumber 3 n},CN=Users,${base}";
+  gpoA = "{A1A1A1A1-0000-4000-8000-000000000001}";
+  gpoB = "{B2B2B2B2-0000-4000-8000-000000000002}";
+  gpoDN = guid: "CN=${guid},CN=Policies,CN=System,${base}";
+  gpo = guid: name: flags: ''
+    dn: ${gpoDN guid}
+    objectClass: groupPolicyContainer
+    displayName: ${name}
+    flags: ${toString flags}
+    versionNumber: 0
+    gPCFileSysPath: \\corp.example.com\sysvol\corp.example.com\Policies\${guid}
+
+  '';
   seedLdif = pkgs.writeText "seed.ldif" (
     lib.concatMapStrings (n: ''
       dn: ${userDN n}
@@ -57,6 +74,18 @@ let
       objectClass: group
       sAMAccountName: vm-team
       ${lib.concatMapStrings (n: "member: ${userDN n}\n") (lib.range 1 5)}member: CN=vm-sub,CN=Users,${base}
+
+    ''
+    + gpo gpoA "vm-gpo-a" 0
+    + gpo gpoB "vm-gpo-b" 1
+    + ''
+      dn: OU=vm-ou,${base}
+      objectClass: organizationalUnit
+      gPLink: [LDAP://cn=${gpoA},cn=policies,cn=system,${base};0][LDAP://cn=${gpoB},cn=policies,cn=system,${base};2]
+
+      dn: OU=vm-child,OU=vm-ou,${base}
+      objectClass: organizationalUnit
+      gPOptions: 1
     ''
   );
 
@@ -266,7 +295,7 @@ let
 
     _, listed = post({"jsonrpc": "2.0", "id": next(ids), "method": "tools/list"}, session)
     tools = sorted(t["name"] for t in listed["result"]["tools"])
-    assert tools == ["ad_api", "ad_computer", "ad_group", "ad_object", "ad_status", "ad_user", "entra_status"], tools
+    assert tools == ["ad_api", "ad_computer", "ad_gpo", "ad_group", "ad_object", "ad_ou", "ad_policy", "ad_status", "ad_user", "entra_status"], tools
 
     ad = call("ad_status", {})
     print("ad_status", json.dumps(ad))
@@ -293,6 +322,7 @@ let
     assert entra["password_writeback"] == {"value": "unknown", "source": "operator-declared"}, entra
     assert ad["probe"]["bound"], ad
     assert {"dns": "corp.example.com", "netbios": "CORP", "dn": "DC=corp,DC=example,DC=com"} in ad["probe"]["domains"], ad
+    assert ad["probe"]["reads"] == {"pso-read": "ok"}, ad["probe"]
 
     # ad_user search across a cursor: the 250 seeded users.
     page = call("ad_user", {"action": "search", "filter": "(sAMAccountName=vmuser*)"})
@@ -330,6 +360,43 @@ let
     raw = call("ad_api", {"action": "search", "base": "CN=Partitions,CN=Configuration,${base}", "scope": "one",
                           "filter": "(objectClass=crossRef)", "attributes": ["nCName", "nETBIOSName"]})
     assert {"dn": "CN=CORP,CN=Partitions,CN=Configuration,${base}", "nCName": "${base}", "nETBIOSName": "CORP"} in raw["results"], raw
+
+    # OUs: link counts, the tree under the domain heads and under vm-ou.
+    ou = call("ad_ou", {"action": "search", "filter": "(name=vm-ou)"})["results"]
+    assert [(o["name"], o["linkCount"]) for o in ou] == [("vm-ou", 2)], ou
+    top = call("ad_ou", {"action": "tree"})["results"]
+    assert {o["name"] for o in top} >= {"vm-ou", "Domain Controllers"}, top
+    child = call("ad_ou", {"action": "tree", "id": "OU=vm-ou,${base}"})["results"]
+    assert [(o["name"], o["gPOptions"]) for o in child] == [("vm-child", "1")], child
+
+    # GPOs: get by GUID with where it is linked; links in inheritance order.
+    a = call("ad_gpo", {"action": "get", "id": "${gpoA}"})
+    print("ad_gpo get", json.dumps(a))
+    assert a["displayName"] == "vm-gpo-a" and a["flags"] == "enabled" and "gPCFileSysPath" in a, a
+    assert a["linked"] == [{"dn": "OU=vm-ou,${base}", "link_order": 2, "enforced": False, "disabled": False}], a
+    assert call("ad_gpo", {"action": "get", "id": "${gpoB}"})["flags"] == "user_settings_disabled"
+    links = call("ad_gpo", {"action": "links", "id": "OU=vm-ou,${base}"})
+    print("ad_gpo links", json.dumps(links))
+    assert [(x["displayName"], x["link_order"], x["enforced"]) for x in links["links"]] == [("vm-gpo-b", 1, True), ("vm-gpo-a", 2, False)], links
+    assert [x["displayName"] for x in links["inheritance"]] == ["vm-gpo-b", "vm-gpo-a", "Default Domain Policy"], links
+    assert links["inheritance"][2]["from"] == "${base}" and not links["block_inheritance"], links
+    blocked = call("ad_gpo", {"action": "links", "id": "OU=vm-child,OU=vm-ou,${base}"})
+    assert blocked["block_inheritance"] and blocked["links"] == [], blocked
+    assert [(x["displayName"], x["from"]) for x in blocked["inheritance"]] == [("vm-gpo-b", "OU=vm-ou,${base}")], blocked
+    dom = call("ad_gpo", {"action": "links", "domain": "corp.example.com"})
+    assert [x["displayName"] for x in dom["inheritance"]] == ["Default Domain Policy"], dom
+
+    # Password policy: the domain default, the PSO, and resultant policies that agree with them.
+    default = call("ad_policy", {"action": "domain_default"})["results"]
+    assert len(default) == 1 and default[0]["domain"] == "corp.example.com" and default[0]["minPwdLength"] == "7", default
+    psos = call("ad_policy", {"action": "psos"})["results"]
+    assert [(p["name"], p["msDS-PasswordSettingsPrecedence"], p["msDS-MinimumPasswordLength"], p["appliesToCount"]) for p in psos] == [("vm-pso", "10", "12", 1)], psos
+    pso = call("ad_policy", {"action": "psos", "id": psos[0]["dn"]})
+    assert pso["msDS-PSOAppliesTo"] == ["CN=vm-team,CN=Users,${base}"] and pso["msDS-LockoutThreshold"] == "5", pso
+    via_team = call("ad_user", {"action": "resultant_policy", "id": "vmuser001"})
+    assert via_team["source"] == "pso" and via_team["policy"] == pso, via_team
+    plain = call("ad_user", {"action": "resultant_policy", "id": "vmuser100"})
+    assert plain["source"] == "domain_default" and plain["policy"] == default[0], plain
     print("ok")
   '';
 
@@ -367,13 +434,27 @@ pkgs.testers.runNixOSTest {
         ];
         preStart = ''
           if [ ! -e /var/lib/samba-dc/private/sam.ldb ]; then
+            # Not Samba's auto-generated certificates: their serial is time(NULL)'s
+            # little-endian bytes, negative in DER half the time, and Go rejects those.
+            mkdir -p ${tlsDir} && cd ${tlsDir}
+            ${openssl} req -x509 -newkey rsa:2048 -nodes -subj /CN=vm-test-ca -days 2 -keyout ca.key -out ca.pem
+            ${openssl} req -newkey rsa:2048 -nodes -subj /CN=${dcHost} -keyout key.pem -out req.csr
+            printf 'subjectAltName=DNS:${dcHost}\nextendedKeyUsage=serverAuth\n' > ext.cnf
+            ${openssl} x509 -req -in req.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 2 -extfile ext.cnf -out cert.pem
+            chmod 0600 key.pem ca.key
             samba-tool domain provision --server-role=dc --use-rfc2307 \
               --dns-backend=SAMBA_INTERNAL --realm=${realm} --domain=CORP \
               --adminpass='${adminPass}' --targetdir=/var/lib/samba-dc --host-ip=127.0.0.1
             # provision --option does not persist this; the old password must stop binding at once.
             sed -i '/\[global\]/a old password allowed period = 0' ${smbConf}
+            sed -i '/\[global\]/a tls keyfile = ${tlsDir}/key.pem\n\ttls certfile = ${tlsDir}/cert.pem\n\ttls cafile = ${tlsDir}/ca.pem' ${smbConf}
             samba-tool user create ${bindUser} '${bindPass}' -s ${smbConf}
             ldbadd -H /var/lib/samba-dc/private/sam.ldb ${seedLdif}
+            # PSOs are unreadable to the bind account by default; delegate it first so vm-pso inherits it.
+            samba-tool dsacl set -H /var/lib/samba-dc/private/sam.ldb -s ${smbConf} \
+              --objectdn='CN=Password Settings Container,CN=System,${base}' --sddl='(A;CI;RPLCLORC;;;AU)'
+            samba-tool domain passwordsettings pso create vm-pso 10 --min-pwd-length=12 --account-lockout-threshold=5 -s ${smbConf}
+            samba-tool domain passwordsettings pso apply vm-pso vm-team -s ${smbConf}
           fi
         '';
         serviceConfig = {
@@ -386,8 +467,7 @@ pkgs.testers.runNixOSTest {
         };
       };
 
-      # Samba writes its CA on first start. Wait for it and LDAPS, then
-      # publish the CA where the DynamicUser service can read it.
+      # Wait for LDAPS, then publish the CA where the DynamicUser service can read it.
       systemd.services.samba-dc-ca = {
         description = "Publish the Samba DC's CA";
         requires = [ "samba-dc.service" ];
@@ -395,14 +475,9 @@ pkgs.testers.runNixOSTest {
         serviceConfig.Type = "oneshot";
         serviceConfig.RemainAfterExit = true;
         script = ''
-          ca=/var/lib/samba-dc/private/tls/ca.pem
-          # Validate the copy, not the source: samba may still be rewriting
-          # it, and a half-written CA restart-loops the server forever. The
-          # copy is good once LDAPS verifies against it.
-          until install -m 0444 $ca /run/samba-ca.pem.tmp 2>/dev/null \
-            && ${lib.getExe pkgs.openssl} s_client -connect 127.0.0.1:636 -CAfile /run/samba-ca.pem.tmp \
-              -verify_return_error </dev/null >/dev/null 2>&1; do sleep 0.5; done
-          mv /run/samba-ca.pem.tmp /run/samba-ca.pem
+          until ${openssl} s_client -connect 127.0.0.1:636 -CAfile ${tlsDir}/ca.pem \
+            -verify_return_error </dev/null >/dev/null 2>&1; do sleep 0.5; done
+          install -m 0444 ${tlsDir}/ca.pem /run/samba-ca.pem
         '';
       };
 

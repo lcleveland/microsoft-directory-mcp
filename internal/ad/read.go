@@ -14,7 +14,7 @@ var guidRE = regexp.MustCompile(`^\{?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4
 
 // Resolve turns an identifier into the DN of an object matching class (an
 // LDAP filter). The identifier is detected: a DN (has =) is returned as is;
-// a SID (S-1-), GUID or UPN (has @) is found on the GC; anything else is a
+// a SID (S-1-), GUID (objectGUID, or a GPO's name) or UPN (has @) is found on the GC; anything else is a
 // sAMAccountName, optionally DOMAIN\sam, searched domain by domain.
 func (c *Client) Resolve(ctx context.Context, id, class string) (string, error) {
 	var filter string
@@ -32,7 +32,8 @@ func (c *Client) Resolve(ctx context.Context, id, class string) (string, error) 
 		if err != nil {
 			return "", err
 		}
-		filter = "(objectGUID=" + escapeBytes(b) + ")"
+		// A GPO is named by its GUID, which isn't its objectGUID.
+		filter = "(|(objectGUID=" + escapeBytes(b) + ")(cn={" + strings.Trim(id, "{}") + "}))"
 	case strings.Contains(id, "@"):
 		filter = "(userPrincipalName=" + ldap.EscapeFilter(id) + ")"
 	default:

@@ -19,10 +19,22 @@ import (
 
 // adKind is what an ad_* tool reads: its object class filter, the brief
 // keys lists return and the curated keys gets return. Keys are LDAP names,
-// plus dn, the derived enabled, and memberCount.
+// plus dn and the derived enabled, memberCount, linkCount and appliesToCount.
+// derive, if set, adds or rewrites keys of a decoded entry.
 type adKind struct {
 	class      string
 	brief, get []string
+	derive     func(map[string]any)
+}
+
+// shape renders a decoded entry of k as keys.
+func (k adKind) shape(keys []string) func(map[string]any) map[string]any {
+	return func(m map[string]any) map[string]any {
+		if k.derive != nil {
+			k.derive(m)
+		}
+		return project(m, keys)
+	}
 }
 
 func (k adKind) curated(more ...string) adKind {
@@ -60,6 +72,10 @@ func attrs(keys []string) []string {
 		case "dn", "membercount":
 		case "enabled":
 			out = append(out, "userAccountControl")
+		case "linkcount":
+			out = append(out, "gPLink")
+		case "appliestocount":
+			out = append(out, "msDS-PSOAppliesTo")
 		default:
 			out = append(out, k)
 		}
@@ -141,7 +157,7 @@ func (d Deps) search(ctx context.Context, k adKind, in adIn, q ad.Query) (map[st
 	}
 	keys := in.keys(k.brief)
 	q.Domain, q.Filter, q.Attrs = in.Domain, f, attrs(keys)
-	q.Shape = func(m map[string]any) map[string]any { return project(m, keys) }
+	q.Shape = k.shape(keys)
 	p, err := d.AD.Search(ctx, q, in.Cursor)
 	if err != nil {
 		return nil, err
@@ -159,7 +175,7 @@ func (d Deps) get(ctx context.Context, k adKind, in adIn) (map[string]any, error
 	if err != nil {
 		return nil, err
 	}
-	out := project(ad.Decode(e, attrs(keys)), keys)
+	out := k.shape(keys)(ad.Decode(e, attrs(keys)))
 	trunc := map[string]any{}
 	for key, v := range out {
 		if l, ok := v.([]any); ok && len(l) > dnCap {
@@ -297,11 +313,32 @@ const adSearchDoc = "Lists search every domain of the forest (domain narrows to 
 	"Keys are LDAP attribute names; values are decoded (SIDs, GUIDs, times as RFC 3339 UTC, null for never). " +
 	"filter takes a raw LDAP filter: read the ad://guide/ldap-filter resource first."
 
-func adReadTool(name, group, title, desc string, k adKind) Tool {
-	return Tool{Name: name, Group: group, Actions: []Action{{Name: "search"}, {Name: "get"}},
+// adExtra is an action of an adReadTool beyond search and get, or one
+// replacing them.
+type adExtra struct {
+	Action
+	run func(Deps, context.Context, adIn) (map[string]any, error)
+}
+
+func adReadTool(name, group, title, desc string, k adKind, extra ...adExtra) Tool {
+	actions := []Action{{Name: "search"}, {Name: "get"}}
+	for _, x := range extra {
+		if i := slices.IndexFunc(actions, func(a Action) bool { return a.Name == x.Name }); i >= 0 {
+			actions[i] = x.Action
+		} else {
+			actions = append(actions, x.Action)
+		}
+	}
+	return Tool{Name: name, Group: group, Actions: actions,
 		add: func(s *mcp.Server, d Deps, t Tool, visible []string) {
 			addActionTool(s, d, t, &mcp.Tool{Name: name, Title: title, Description: desc + "\n\n" + adSearchDoc, Annotations: readOnly}, visible,
 				func(ctx context.Context, _ *mcp.CallToolRequest, in adIn) (*mcp.CallToolResult, map[string]any, error) {
+					for _, x := range extra {
+						if x.Name == in.Action {
+							out, err := x.run(d, ctx, in)
+							return nil, out, err
+						}
+					}
 					if in.Action == "get" {
 						out, err := d.get(ctx, k, in)
 						return nil, out, err
@@ -318,7 +355,10 @@ func init() {
 			"Users of the forest. search: list users by query (name) or filter, as briefs (dn, sAMAccountName, "+
 				"userPrincipalName, displayName, mail, enabled, objectSid, lastLogonTimestamp, whenCreated). get: one user by id, "+
 				"with password, lockout and expiry times, title, department, manager, memberOf (first 100), "+
-				"servicePrincipalName and userAccountControl flags. lastLogonTimestamp replicates lazily (up to 14 days behind).", adUsers),
+				"servicePrincipalName and userAccountControl flags. lastLogonTimestamp replicates lazily (up to 14 days behind). "+
+				"resultant_policy: the password and lockout policy that applies to the user by id: the PSO msDS-ResultantPSO "+
+				"names (as ad_policy psos gets it), else its domain's default policy.", adUsers,
+			adExtra{Action{Name: "resultant_policy", ADProbe: "pso-read"}, Deps.resultantPolicy}),
 		Tool{Name: "ad_group", Group: "identity", Actions: []Action{{Name: "search"}, {Name: "get"}, {Name: "members"}},
 			add: func(s *mcp.Server, d Deps, t Tool, visible []string) {
 				addActionTool(s, d, t, &mcp.Tool{Name: t.Name, Title: "Active Directory groups", Annotations: readOnly,
@@ -347,6 +387,7 @@ func init() {
 				"enabled, objectSid, lastLogonTimestamp, whenCreated). get: one computer by id, with operating system "+
 				"and version, managedBy, servicePrincipalName, supported encryption types and the LAPS password expiry "+
 				"(never the password).", adComputers),
+		adOUTool,
 		Tool{Name: "ad_object", Group: "identity", Actions: []Action{{Name: "get"}, {Name: "search_deleted"}},
 			add: func(s *mcp.Server, d Deps, t Tool, visible []string) {
 				addActionTool(s, d, t, &mcp.Tool{Name: t.Name, Title: "Any Active Directory object", Annotations: readOnly,
@@ -363,6 +404,8 @@ func init() {
 						return nil, out, err
 					})
 			}},
+		adGPOTool,
+		adPolicyTool,
 		Tool{Name: "ad_api", Group: "core", Actions: []Action{{Name: "search"}},
 			add: func(s *mcp.Server, d Deps, t Tool, visible []string) {
 				addActionTool(s, d, t, &mcp.Tool{Name: t.Name, Title: "Raw Active Directory search", Annotations: readOnly,

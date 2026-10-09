@@ -30,7 +30,7 @@ var (
 	// ponytail: a fixed list, not the schema's isSingleValued; read the schema if the inconsistency bites.
 	multiValued = set("objectClass", "memberOf", "member", "directReports", "servicePrincipalName", "proxyAddresses",
 		"sIDHistory", "tokenGroups", "dSCorePropagationData", "otherTelephone", "otherMobile", "url", "wWWHomePage",
-		"msDS-AllowedToDelegateTo", "userWorkstations", "namingContexts", "managedObjects", "gPLink")
+		"msDS-AllowedToDelegateTo", "userWorkstations", "namingContexts", "managedObjects", "msDS-PSOAppliesTo")
 )
 
 func set(names ...string) map[string]bool {
@@ -41,11 +41,18 @@ func set(names ...string) map[string]bool {
 	return m
 }
 
-// uacFlags are the userAccountControl bits by name, in bit order.
-var uacFlags = []struct {
+type flag struct {
 	bit  uint32
 	name string
-}{
+}
+
+// pwdFlags are the pwdProperties bits of a domain head by name, in bit order.
+var pwdFlags = []flag{{0x1, "DOMAIN_PASSWORD_COMPLEX"}, {0x2, "DOMAIN_PASSWORD_NO_ANON_CHANGE"},
+	{0x4, "DOMAIN_PASSWORD_NO_CLEAR_CHANGE"}, {0x8, "DOMAIN_LOCKOUT_ADMINS"}, {0x10, "DOMAIN_PASSWORD_STORE_CLEARTEXT"},
+	{0x20, "DOMAIN_REFUSE_PASSWORD_CHANGE"}}
+
+// uacFlags are the userAccountControl bits by name, in bit order.
+var uacFlags = []flag{
 	{0x1, "SCRIPT"}, {0x2, "ACCOUNTDISABLE"}, {0x8, "HOMEDIR_REQUIRED"}, {0x10, "LOCKOUT"},
 	{0x20, "PASSWD_NOTREQD"}, {0x40, "PASSWD_CANT_CHANGE"}, {0x80, "ENCRYPTED_TEXT_PWD_ALLOWED"},
 	{0x100, "TEMP_DUPLICATE_ACCOUNT"}, {0x200, "NORMAL_ACCOUNT"}, {0x800, "INTERDOMAIN_TRUST_ACCOUNT"},
@@ -112,14 +119,11 @@ func value(key string, raw []byte) (any, bool) {
 		}
 		return isoDuration(time.Duration(-n) * 100), true
 	case key == "useraccountcontrol":
-		n, _ := strconv.ParseUint(s, 10, 32)
-		flags := []string{}
-		for _, f := range uacFlags {
-			if uint32(n)&f.bit != 0 {
-				flags = append(flags, f.name)
-			}
-		}
-		return flags, true
+		return flagNames(s, uacFlags), true
+	case key == "pwdproperties":
+		return flagNames(s, pwdFlags), true
+	case key == "gplink":
+		return ParseGPLink(s), true
 	case key == "grouptype":
 		n, _ := strconv.ParseInt(s, 10, 32)
 		g := map[string]string{"scope": "global", "type": "distribution"}
@@ -147,6 +151,18 @@ func value(key string, raw []byte) (any, bool) {
 		return nil, false
 	}
 	return s, true
+}
+
+// flagNames lists the names of the bits set in the integer s.
+func flagNames(s string, flags []flag) []string {
+	n, _ := strconv.ParseUint(s, 10, 32)
+	out := []string{}
+	for _, f := range flags {
+		if uint32(n)&f.bit != 0 {
+			out = append(out, f.name)
+		}
+	}
+	return out
 }
 
 // isoDuration renders d as an ISO 8601 duration, days being 24 hours.

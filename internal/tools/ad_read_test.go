@@ -12,9 +12,9 @@ import (
 	"github.com/lcleveland/microsoft-directory-mcp/internal/config"
 )
 
-// The real AD roster registers (its input schemas build) with every action,
-// and the filter guide is served.
-func TestADReadRosterRegisters(t *testing.T) {
+// adSession registers the real AD roster under probe and connects a client.
+func adSession(t *testing.T, probe *ad.Probe) *mcp.ClientSession {
+	t.Helper()
 	cfg := &config.Config{ToolGroups: map[string]bool{}, AD: &config.AD{TLS: "ldaps", DCs: []string{"127.0.0.1:1"}}}
 	for _, g := range config.Groups {
 		cfg.ToolGroups[g] = true
@@ -24,7 +24,7 @@ func TestADReadRosterRegisters(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := mcp.NewServer(&mcp.Implementation{Name: "t"}, nil)
-	Register(s, Deps{Config: cfg, AD: a})
+	Register(s, Deps{Config: cfg, AD: a, ADProbe: probe})
 	st, ct := mcp.NewInMemoryTransports()
 	ctx := context.Background()
 	if _, err := s.Connect(ctx, st, nil); err != nil {
@@ -34,11 +34,20 @@ func TestADReadRosterRegisters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cs.Close()
+	t.Cleanup(func() { cs.Close() })
+	return cs
+}
+
+// The real AD roster registers (its input schemas build) with every action,
+// and the filter guide is served.
+func TestADReadRosterRegisters(t *testing.T) {
+	cs := adSession(t, nil)
+	ctx := context.Background()
 	got := listed(t, cs)
 	for name, want := range map[string][]string{
-		"ad_user": {"search", "get"}, "ad_group": {"search", "get", "members"}, "ad_computer": {"search", "get"},
-		"ad_object": {"get", "search_deleted"}, "ad_api": {"search"},
+		"ad_user": {"search", "get", "resultant_policy"}, "ad_group": {"search", "get", "members"}, "ad_computer": {"search", "get"},
+		"ad_ou": {"search", "get", "tree"}, "ad_object": {"get", "search_deleted"}, "ad_gpo": {"search", "get", "links"},
+		"ad_policy": {"domain_default", "psos"}, "ad_api": {"search"},
 	} {
 		if !slices.Equal(got[name], want) {
 			t.Errorf("%s: actions %v, want %v", name, got[name], want)
@@ -47,6 +56,31 @@ func TestADReadRosterRegisters(t *testing.T) {
 	res, err := cs.ReadResource(ctx, &mcp.ReadResourceParams{URI: "ad://guide/ldap-filter"})
 	if err != nil || len(res.Contents) != 1 || len(res.Contents[0].Text) < 100 {
 		t.Errorf("guide: %v %v", res, err)
+	}
+}
+
+// Without the right to read PSOs, the actions that need it are hidden.
+func TestPSOProbeHidesActions(t *testing.T) {
+	cs := adSession(t, &ad.Probe{Bound: true, Reads: map[string]string{"pso-read": "cannot read the Password Settings Container"}})
+	got := listed(t, cs)
+	if !slices.Equal(got["ad_policy"], []string{"domain_default"}) || !slices.Equal(got["ad_user"], []string{"search", "get"}) {
+		t.Errorf("ad_policy %v, ad_user %v", got["ad_policy"], got["ad_user"])
+	}
+	want := []string{"ad_user resultant_policy: AD right: pso-read: cannot read the Password Settings Container",
+		"ad_policy psos: AD right: pso-read: cannot read the Password Settings Container"}
+	if h := hidden(status(t, cs, "ad_status")); !slices.Equal(h, want) {
+		t.Errorf("hidden %q", h)
+	}
+}
+
+func TestAncestors(t *testing.T) {
+	got, err := ancestors("DC=corp,DC=example,DC=com", `OU=b,OU=Smith\, J,DC=corp,DC=example,DC=com`)
+	want := []string{"DC=corp,DC=example,DC=com", `OU=Smith\, J,DC=corp,DC=example,DC=com`, `OU=b,OU=Smith\, J,DC=corp,DC=example,DC=com`}
+	if err != nil || !slices.Equal(got, want) {
+		t.Errorf("%q %v", got, err)
+	}
+	if _, err := ancestors("DC=child,DC=corp", "OU=a,DC=corp"); err == nil {
+		t.Error("not under: want an error")
 	}
 }
 

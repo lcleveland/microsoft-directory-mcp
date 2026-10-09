@@ -54,6 +54,11 @@ func TestDecode(t *testing.T) {
 			`{"dn":"CN=u,DC=corp,DC=example,DC=com","thumbnailPhoto":"/9j/"}`},
 		"multi-valued": {map[string][]string{"objectClass": {"top"}, "servicePrincipalName": {"a/b", "c/d"}}, nil,
 			`{"dn":"CN=u,DC=corp,DC=example,DC=com","objectClass":["top"],"servicePrincipalName":["a/b","c/d"]}`},
+		"gPLink": {map[string][]string{"gPLink": {"[LDAP://cn={A},cn=policies,cn=system,DC=x;0][LDAP://cn={B},cn=policies,cn=system,DC=x;2]"}}, nil,
+			`{"dn":"CN=u,DC=corp,DC=example,DC=com","gPLink":[{"gpo":"cn={B},cn=policies,cn=system,DC=x","link_order":1,"enforced":true,"disabled":false},` +
+				`{"gpo":"cn={A},cn=policies,cn=system,DC=x","link_order":2,"enforced":false,"disabled":false}]}`},
+		"pwdProperties": {map[string][]string{"pwdProperties": {"17"}, "msDS-PSOAppliesTo": {"CN=g"}}, nil,
+			`{"dn":"CN=u,DC=corp,DC=example,DC=com","msDS-PSOAppliesTo":["CN=g"],"pwdProperties":["DOMAIN_PASSWORD_COMPLEX","DOMAIN_PASSWORD_STORE_CLEARTEXT"]}`},
 		"ranged name": {map[string][]string{"member;range=0-1": {"CN=a", "CN=b"}}, nil,
 			`{"dn":"CN=u,DC=corp,DC=example,DC=com","member":["CN=a","CN=b"]}`},
 	} {
