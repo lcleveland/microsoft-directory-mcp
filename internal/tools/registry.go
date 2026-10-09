@@ -19,10 +19,11 @@ import (
 // Action is one action of a tool and what it needs to work. An action whose
 // needs the startup probe found missing is hidden.
 type Action struct {
-	Name    string
-	Perms   []string // Entra application permissions, any of
-	Licence string   // P1, P2 or Intune
-	ADProbe string   // an ad.ReadProbes name
+	Name      string
+	Perms     []string // Entra application permissions, any of
+	AlsoPerms []string // and any of these too
+	Licence   string   // P1, P2 or Intune
+	ADProbe   string   // an ad.ReadProbes name
 	// Capabilities make it a write, shown only when one of them is enabled.
 	Capabilities []string
 }
@@ -86,8 +87,10 @@ func (d Deps) visibility(t Tool) (visible []string, hidden []Hidden) {
 // could not decide shows.
 func (d Deps) why(t Tool, a Action) string {
 	if p := d.EntraProbe; p != nil && t.side() == "entra" {
-		if p.Roles != nil && len(a.Perms) > 0 && !slices.ContainsFunc(a.Perms, func(r string) bool { return slices.Contains(p.Roles, r) }) {
-			return "missing permission: needs one of " + strings.Join(a.Perms, ", ")
+		for _, perms := range [][]string{a.Perms, a.AlsoPerms} {
+			if p.Roles != nil && len(perms) > 0 && !slices.ContainsFunc(perms, func(r string) bool { return slices.Contains(p.Roles, r) }) {
+				return "missing permission: needs one of " + strings.Join(perms, ", ")
+			}
 		}
 		if r, ok := p.Groups[t.Group]; ok && p.Roles == nil && len(a.Perms) > 0 && (r.State == graph.ReadPermission || r.State == graph.ReadLicence) {
 			return fmt.Sprintf("%s read probe refused: %s (HTTP %d %s)", t.Group, r.State, r.Status, r.Code)

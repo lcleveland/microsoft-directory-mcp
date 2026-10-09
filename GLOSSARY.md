@@ -59,7 +59,7 @@ A named class of write the operator opts into; writes outside an enabled capabil
 _Avoid_: permission, verb flag
 
 **Protected target**:
-An object the server never writes, whatever capabilities are enabled: a tier-0 object in the forest, or a user holding an admin role (or in a role-assignable group) in the tenant.
+An object the server never writes, whatever capabilities are enabled: a tier-0 object in the forest, or a user holding an admin role (or in a role-assignable group, or owning an app or service principal) in the tenant.
 _Avoid_: privileged object, admin object, tier-0 (alone)
 
 **Tool group**:

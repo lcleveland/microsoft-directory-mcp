@@ -70,7 +70,7 @@ func TestClassifyEntra(t *testing.T) {
 
 // Users the stub knows: u1 cloud-only, u2 synced, u3 a directory role
 // holder by membership, u4 in a role-assignable group, u5 owning one, u6
-// assigned a custom role scoped to an admin unit.
+// assigned a custom role scoped to an admin unit, u7 owning an application.
 const (
 	u1 = "00000000-0000-0000-0000-000000000001"
 	u2 = "00000000-0000-0000-0000-000000000002"
@@ -78,6 +78,7 @@ const (
 	u4 = "00000000-0000-0000-0000-000000000004"
 	u5 = "00000000-0000-0000-0000-000000000005"
 	u6 = "00000000-0000-0000-0000-000000000006"
+	u7 = "00000000-0000-0000-0000-000000000007"
 )
 
 // Groups the stub knows: g1 cloud-only, g2 synced, g3 role-assignable; m1
@@ -114,6 +115,8 @@ func entraWriteStub(write string) func(*http.Request) string {
 			return `{"value":[{"@odata.type":"#microsoft.graph.group","id":"g0"},{"@odata.type":"#microsoft.graph.directoryRole","id":"r1","displayName":"Helpdesk Administrator"}]}`
 		case strings.HasSuffix(p, "/transitiveMemberOf") && id == u4, strings.HasSuffix(p, "/ownedObjects") && id == u5:
 			return `{"value":[{"@odata.type":"#microsoft.graph.group","id":"g1","displayName":"tier0","isAssignableToRole":true}]}`
+		case strings.HasSuffix(p, "/ownedObjects") && id == u7:
+			return `{"value":[{"@odata.type":"#microsoft.graph.application","id":"a1","displayName":"backend"}]}`
 		case strings.HasSuffix(p, "/transitiveMemberOf"), strings.HasSuffix(p, "/ownedObjects"):
 			return `{"value":[{"@odata.type":"#microsoft.graph.group","id":"g0","displayName":"staff","isAssignableToRole":false}]}`
 		case strings.HasSuffix(p, "/authentication/methods/"+m1):
@@ -246,6 +249,18 @@ func TestEntraWriteRefusals(t *testing.T) {
 	}
 }
 
+// A user owning an application is protected: its owner can add a
+// credential to the app and sign in as it, whatever it holds.
+func TestEntraAppOwnerProtected(t *testing.T) {
+	for name, a := range map[string]entraAction{"reset_password": entraResetPassword, "issue_tap": entraIssueTAP, "disable": entraAccountState("disable")} {
+		d, _, writes := entraWriteDeps(t, "", "entra-credentials", "entra-account-state")
+		_, err := entraCall(d, a, entraIn{ID: u7, writeIn: writeIn{Confirm: "user@example.com"}})
+		if err == nil || !strings.Contains(err.Error(), "protected target: it owns the application backend") || len(writes()) != 0 {
+			t.Errorf("%s: %v, wrote %v", name, err, writes())
+		}
+	}
+}
+
 // Revoking sessions is allowed on a synced user.
 func TestEntraRevokeSynced(t *testing.T) {
 	d, _, writes := entraWriteDeps(t, `{"value":true}`, "entra-account-state")
@@ -300,7 +315,7 @@ func TestEntraAccountStateRegisters(t *testing.T) {
 	if p := props(t, cs, "entra_group"); slices.Contains(p, "reason") {
 		t.Errorf("entra_group, with no write, has reason: %v", p)
 	}
-	cs, _ = entraSession(t, &graph.Probe{Roles: []string{"User.Read.All", "User.RevokeSessions.All"}}, func(*http.Request) string { return `{}` }, "entra-account-state")
+	cs, _ = entraSession(t, &graph.Probe{Roles: []string{"User.Read.All", "User.RevokeSessions.All", "RoleManagement.Read.Directory"}}, func(*http.Request) string { return `{}` }, "entra-account-state")
 	if got := listed(t, cs)["entra_user"]; !slices.Equal(got[len(got)-1:], []string{"revoke_sessions"}) || slices.Contains(got, "disable") {
 		t.Errorf("entra_user with only User.RevokeSessions.All: %v", got)
 	}
@@ -471,6 +486,19 @@ func TestEntraCredentialsRegister(t *testing.T) {
 	}
 	if p := props(t, cs, "entra_group"); !slices.Contains(p, "members") || !slices.Contains(p, "reason") || slices.Contains(p, "confirm") {
 		t.Errorf("entra_group: %v", p)
+	}
+}
+
+// A write needs the role read its protected-target check makes too:
+// without it reset_password is hidden, and entra_status says why.
+func TestEntraWriteNeedsRoleRead(t *testing.T) {
+	cs, _ := entraSession(t, &graph.Probe{Roles: []string{"User.Read.All", "User-PasswordProfile.ReadWrite.All"}, Licences: map[string]string{}}, func(*http.Request) string { return `{}` }, "entra-credentials")
+	if slices.Contains(listed(t, cs)["entra_user"], "reset_password") {
+		t.Errorf("entra_user: %v", listed(t, cs)["entra_user"])
+	}
+	want := "entra_user reset_password: missing permission: needs one of " + strings.Join(roleRead, ", ")
+	if h := hidden(status(t, cs, "entra_status")); !slices.Contains(h, want) {
+		t.Errorf("hidden %q, want %q", h, want)
 	}
 }
 
@@ -816,8 +844,9 @@ func TestIntuneActionsRegister(t *testing.T) {
 		t.Errorf("entra_device: %v", p)
 	}
 	for name, probe := range map[string]*graph.Probe{
-		"no Intune":     {Licences: map[string]string{"Intune": graph.Absent}},
-		"no permission": {Roles: []string{"DeviceManagementManagedDevices.Read.All"}},
+		"no Intune":              {Licences: map[string]string{"Intune": graph.Absent}},
+		"no permission":          {Roles: []string{"DeviceManagementManagedDevices.Read.All"}},
+		"no managed-device read": {Roles: []string{"DeviceManagementManagedDevices.PrivilegedOperations.All"}},
 	} {
 		cs, _ := entraSession(t, probe, func(*http.Request) string { return `{}` }, caps...)
 		if g := listed(t, cs)["entra_device"]; slices.ContainsFunc(g, func(a string) bool { return slices.Contains(actions, a) }) {
