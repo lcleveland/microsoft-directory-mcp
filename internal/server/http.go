@@ -18,8 +18,9 @@ import (
 )
 
 // Handler serves the MCP endpoint, behind a bearer gate when a token is
-// configured, plus an unauthenticated /healthz. The SDK's DNS-rebinding and
-// cross-origin protection stays on.
+// configured, plus an unauthenticated /healthz. The SDK rejects loopback
+// requests with a non-loopback Host (DNS rebinding); cross-origin browser
+// requests are refused here, as the SDK does not check them by default.
 func Handler(cfg *config.Config, s *mcp.Server, log *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -40,7 +41,7 @@ func Handler(cfg *config.Config, s *mcp.Server, log *slog.Logger) http.Handler {
 		h = auth.RequireBearerToken(verify, &auth.RequireBearerTokenOptions{AllowMissingExpiration: true})(h)
 	}
 	mux.Handle(cfg.Path, h)
-	return mux
+	return http.NewCrossOriginProtection().Handler(mux)
 }
 
 // ServeHTTP serves on ln until ctx is cancelled (SIGTERM), then drains for up
@@ -49,6 +50,7 @@ func ServeHTTP(ctx context.Context, ln net.Listener, cfg *config.Config, s *mcp.
 	srv := &http.Server{
 		Handler:           Handler(cfg, s, log),
 		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
 		BaseContext:       func(net.Listener) context.Context { return ctx },
 	}
 	errc := make(chan error, 1)

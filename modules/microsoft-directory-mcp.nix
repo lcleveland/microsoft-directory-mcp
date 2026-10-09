@@ -229,14 +229,14 @@ in
       addr = mkOption {
         type = types.str;
         default = "127.0.0.1:8235";
-        description = "Listen address as host:port (`--addr`). A non-loopback host requires authTokenFile.";
+        description = "Listen address as host:port (`--addr`). A non-loopback host requires authTokenFile. Without it, loopback is open to every local user and process, with whatever capabilities are on; set authTokenFile on a shared host.";
       };
       path = mkOption {
         type = types.str;
         default = "/mcp";
         description = "URL path of the MCP endpoint (`--path`).";
       };
-      authTokenFile = opt "http-auth-token-file" "Runtime path to the bearer token HTTP clients must send, passed via systemd `LoadCredential`";
+      authTokenFile = opt "http-auth-token-file" "Runtime path to the bearer token HTTP clients must send, passed via systemd `LoadCredential`; required for a non-loopback addr, and on a shared host, where loopback is open to every local user";
     };
 
     toolGroups = mkOption {

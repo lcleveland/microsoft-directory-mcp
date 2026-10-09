@@ -148,3 +148,35 @@ func TestHTTPBearer(t *testing.T) {
 		t.Errorf("healthz behind auth: %v %v", resp, err)
 	}
 }
+
+// A page on another site must not reach /mcp; same-origin and non-browser
+// (no Origin) requests still do.
+func TestHTTPCrossOrigin(t *testing.T) {
+	cfg := &config.Config{}
+	ts := httptest.NewServer(Handler(cfg, entraOnly(t, cfg), discard))
+	defer ts.Close()
+	post := func(h map[string]string) int {
+		req, _ := http.NewRequest("POST", ts.URL+"/mcp", strings.NewReader(
+			`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		for k, v := range h {
+			req.Header.Set(k, v)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if c := post(map[string]string{"Origin": "https://evil.example.com", "Sec-Fetch-Site": "cross-site"}); c != http.StatusForbidden {
+		t.Errorf("cross-site POST: %d", c)
+	}
+	if c := post(map[string]string{"Origin": ts.URL, "Sec-Fetch-Site": "same-origin"}); c != http.StatusOK {
+		t.Errorf("same-origin POST: %d", c)
+	}
+	if c := post(nil); c != http.StatusOK {
+		t.Errorf("no-Origin POST: %d", c)
+	}
+}

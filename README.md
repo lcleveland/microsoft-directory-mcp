@@ -259,6 +259,8 @@ Secrets (the bind password, the Entra key, and the HTTP bearer token) are read o
 
 Over HTTP, clients send the token as `Authorization: Bearer <token>`. `/healthz` stays open.
 
+Without a token, a loopback `--addr` is open to every local user and process on the host, with whatever capabilities are on. On a shared host, set `--http-auth-token-file` even on loopback. Browser pages on other sites are refused either way.
+
 ## AD setup
 
 ### Service account
