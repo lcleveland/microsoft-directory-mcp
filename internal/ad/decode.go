@@ -133,7 +133,7 @@ func value(key string, raw []byte) (any, bool) {
 		if err != nil || n == math.MinInt64 {
 			return nil, true // never
 		}
-		return isoDuration(time.Duration(-n) * 100), true
+		return isoDuration(-n), true
 	case key == "useraccountcontrol" || key == "msds-user-account-control-computed":
 		return flagNames(s, uacFlags), true
 	case key == "trustattributes":
@@ -195,15 +195,17 @@ func flagNames(s string, flags []flag) []string {
 	return out
 }
 
-// isoDuration renders d as an ISO 8601 duration, days being 24 hours.
-func isoDuration(d time.Duration) string {
-	if d <= 0 {
+// isoDuration renders t, in 100ns ticks, as an ISO 8601 duration, days
+// being 24 hours. Days are split off in ticks: a Duration of t*100 would
+// overflow past about 292 years.
+func isoDuration(t int64) string {
+	if t <= 0 {
 		return "PT0S"
 	}
-	s := "P"
-	if days := d / (24 * time.Hour); days > 0 {
+	const day = int64(24 * time.Hour / 100)
+	s, d := "P", time.Duration(t%day)*100
+	if days := t / day; days > 0 {
 		s += fmt.Sprintf("%dD", days)
-		d -= days * 24 * time.Hour
 	}
 	if d == 0 {
 		return s

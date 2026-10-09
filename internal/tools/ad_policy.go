@@ -129,6 +129,7 @@ func (d Deps) drain(ctx context.Context, q ad.Query) ([]map[string]any, []ad.Ski
 			return out, skipped, nil
 		}
 		if len(out) >= drainLimit {
+			d.AD.Release(p.NextCursor)
 			return nil, nil, fmt.Errorf("more than %d results for %s", drainLimit, q.Filter)
 		}
 		cursor = p.NextCursor

@@ -84,7 +84,7 @@ func TestModifyRails(t *testing.T) {
 	c := f.client(srvConfig())
 	ctx := context.Background()
 
-	tgt, err := c.Modify(ctx, plain, userClass, nil, describe)
+	tgt, err := c.Modify(ctx, plain, userClass, nil, describe, nil)
 	if err != nil || tgt != (Target{DC: "dc2.corp.example.com:636"}) {
 		t.Fatalf("plain: %+v %v", tgt, err)
 	}
@@ -96,7 +96,7 @@ func TestModifyRails(t *testing.T) {
 	}
 
 	for name, dn := range cases {
-		_, err := c.Modify(ctx, dn, "(objectClass=*)", nil, describe)
+		_, err := c.Modify(ctx, dn, "(objectClass=*)", nil, describe, nil)
 		if !errors.Is(err, ErrProtected) {
 			t.Errorf("%s: want a protected refusal, got %v", name, err)
 		}
@@ -105,16 +105,16 @@ func TestModifyRails(t *testing.T) {
 		t.Errorf("a protected target was written: %q", f.modifies)
 	}
 	// A group in no group has no tokenGroups, and that is no refusal.
-	if _, err := c.Modify(ctx, lonely, "(objectClass=group)", nil, describe); err != nil || len(f.modifies) != 2 {
+	if _, err := c.Modify(ctx, lonely, "(objectClass=group)", nil, describe, nil); err != nil || len(f.modifies) != 2 {
 		t.Errorf("lonely: %v %q", err, f.modifies)
 	}
 
 	// vet refusing sends nothing; a wrong class matches nothing.
 	boom := errors.New("confirm mismatch")
-	if _, err := c.Modify(ctx, plain, userClass, nil, func(*ldap.Entry) (any, error) { return nil, boom }); !errors.Is(err, boom) {
+	if _, err := c.Modify(ctx, plain, userClass, nil, func(*ldap.Entry) (any, error) { return nil, boom }, nil); !errors.Is(err, boom) {
 		t.Errorf("vet error: %v", err)
 	}
-	if _, err := c.Modify(ctx, plain, "(objectClass=computer)", nil, describe); !errors.Is(err, ErrNoMatch) {
+	if _, err := c.Modify(ctx, plain, "(objectClass=computer)", nil, describe, nil); !errors.Is(err, ErrNoMatch) {
 		t.Errorf("wrong class: %v", err)
 	}
 	if len(f.modifies) != 2 {
@@ -123,7 +123,7 @@ func TestModifyRails(t *testing.T) {
 
 	// insufficientAccessRights comes back as itself, with a delegation hint.
 	f.denied = map[string]bool{strings.ToLower(plain): true}
-	_, err = c.Modify(ctx, plain, userClass, nil, describe)
+	_, err = c.Modify(ctx, plain, userClass, nil, describe, nil)
 	if !ldap.IsErrorWithCode(err, ldap.LDAPResultInsufficientAccessRights) || !strings.Contains(err.Error(), "write access to description") {
 		t.Errorf("denied: %v", err)
 	}
@@ -143,13 +143,13 @@ func TestModifyCompareAndSwap(t *testing.T) {
 		}
 	}
 	ctx := context.Background()
-	if _, err := c.Modify(ctx, plain, userClass, nil, cas("512", "514")); err != nil {
+	if _, err := c.Modify(ctx, plain, userClass, nil, cas("512", "514"), nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.tree[strings.ToLower(plain)]["userAccountControl"]; !slices.Equal(got, []string{"514"}) {
 		t.Errorf("after: %v", got)
 	}
-	if _, err := c.Modify(ctx, plain, userClass, nil, cas("512", "514")); !ldap.IsErrorWithCode(err, ldap.LDAPResultNoSuchAttribute) {
+	if _, err := c.Modify(ctx, plain, userClass, nil, cas("512", "514"), nil); !ldap.IsErrorWithCode(err, ldap.LDAPResultNoSuchAttribute) {
 		t.Errorf("stale value: %v", err)
 	}
 }

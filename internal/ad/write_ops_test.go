@@ -21,36 +21,36 @@ func TestWriteKinds(t *testing.T) {
 	f.tree[strings.ToLower("OU=Staff,"+corpDN)] = map[string][]string{"objectClass": {"top", "organizationalUnit"}}
 	if _, err := c.Modify(ctx, plain, userClass, nil, func(e *ldap.Entry) (any, error) {
 		return ldap.NewModifyDNRequest(e.DN, "CN=plain", true, "OU=Staff,"+corpDN), nil
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if f.tree[strings.ToLower(moved)] == nil || f.tree[strings.ToLower(plain)] != nil {
 		t.Errorf("not moved: %q", f.modifies)
 	}
-	if _, err := c.Modify(ctx, moved, userClass, nil, func(e *ldap.Entry) (any, error) { return ldap.NewDelRequest(e.DN, nil), nil }); err != nil {
+	if _, err := c.Modify(ctx, moved, userClass, nil, func(e *ldap.Entry) (any, error) { return ldap.NewDelRequest(e.DN, nil), nil }, nil); err != nil {
 		t.Fatal(err)
 	}
 	if f.tree[strings.ToLower(moved)]["isDeleted"] == nil {
 		t.Errorf("not deleted: %v", f.tree[strings.ToLower(moved)])
 	}
 	// A deleted object, which has no memberships to check, is written only by a restore.
-	if _, err := c.Modify(ctx, moved, "(isDeleted=TRUE)", nil, describe); err == nil || !strings.Contains(err.Error(), "only ad_object restore") {
+	if _, err := c.Modify(ctx, moved, "(isDeleted=TRUE)", nil, describe, func() { t.Error("sending called for a refused write") }); err == nil || !strings.Contains(err.Error(), "only ad_object restore") {
 		t.Errorf("deleted, no show-deleted: %v", err)
 	}
 	if _, err := c.Modify(ctx, moved, "(isDeleted=TRUE)", nil, func(e *ldap.Entry) (any, error) {
 		return &ldap.ModifyRequest{DN: e.DN, Controls: []ldap.Control{ldap.NewControlMicrosoftShowDeleted()}, Changes: []ldap.Change{
 			{Operation: ldap.ReplaceAttribute, Modification: ldap.PartialAttribute{Type: "description", Vals: []string{"x"}}}}}, nil
-	}); err != nil {
+	}, nil); err != nil {
 		t.Errorf("deleted pre-read: %v", err)
 	}
-	if _, err := c.Modify(ctx, cases["adminCount"], userClass, nil, func(e *ldap.Entry) (any, error) { return ldap.NewDelRequest(e.DN, nil), nil }); !errors.Is(err, ErrProtected) {
+	if _, err := c.Modify(ctx, cases["adminCount"], userClass, nil, func(e *ldap.Entry) (any, error) { return ldap.NewDelRequest(e.DN, nil), nil }, nil); !errors.Is(err, ErrProtected) {
 		t.Errorf("protected delete: %v", err)
 	}
 
 	// A move into another domain is refused before sending.
 	if _, err := c.Modify(ctx, lonely, "(objectClass=group)", nil, func(e *ldap.Entry) (any, error) {
 		return ldap.NewModifyDNRequest(e.DN, "CN=lonely", true, "CN=Users,"+childDN), nil
-	}); err == nil || !strings.Contains(err.Error(), "cross-domain moves are never made") {
+	}, func() { t.Error("sending called for a refused move") }); err == nil || !strings.Contains(err.Error(), "cross-domain moves are never made") {
 		t.Errorf("cross-domain move: %v", err)
 	}
 

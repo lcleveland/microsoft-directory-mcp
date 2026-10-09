@@ -238,9 +238,10 @@ const (
 // is over maxWait or would outlast ctx's deadline; other methods are never
 // retried.
 func (c *Client) send(ctx context.Context, method, u string, eventual bool, body []byte) ([]byte, error) {
-	force := false
+	force, refreshed := false, false
 	for retries := 0; ; {
 		tok, _, err := c.bearer(ctx, force)
+		force = false // only the retry after a 401 refetches
 		if err != nil {
 			return nil, err
 		}
@@ -268,8 +269,8 @@ func (c *Client) send(ctx context.Context, method, u string, eventual bool, body
 		switch st := resp.StatusCode; {
 		case st/100 == 2:
 			return b, nil
-		case st == http.StatusUnauthorized && !force:
-			force = true
+		case st == http.StatusUnauthorized && !refreshed:
+			force, refreshed = true, true
 			continue
 		case method == http.MethodGet && (st == http.StatusTooManyRequests || st == http.StatusServiceUnavailable) && retries < maxRetries:
 			wait := retryAfter(resp.Header, retries)

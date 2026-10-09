@@ -207,3 +207,13 @@ func (c *Client) keep(p *paged) string {
 	c.cursors[id] = p
 	return id
 }
+
+// Release closes the search behind cursor, for a caller that stops paging early.
+func (c *Client) Release(cursor string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if p, ok := c.cursors[cursor]; ok {
+		p.close()
+		delete(c.cursors, cursor)
+	}
+}
