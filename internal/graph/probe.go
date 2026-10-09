@@ -121,10 +121,8 @@ func (c *Client) Probe(ctx context.Context) *Probe {
 	return p
 }
 
-// read GETs path?$top=1 and classifies the reply. 2xx and 404 are ok. The
-// licence shapes are 403 Forbidden, 403
-// Authentication_RequestFromNonPremiumTenantOrB2CTenant and 400
-// AadPremiumLicenseRequired; any other 403 is a missing permission.
+// read GETs path?$top=1 and classifies the reply. 2xx and 404 are ok, a
+// LicenceRefused is the licence, and any other 403 a missing permission.
 func (c *Client) read(ctx context.Context, path string) Read {
 	var discard json.RawMessage
 	err := c.Get(ctx, path+"?$top=1", &discard)
@@ -139,13 +137,21 @@ func (c *Client) read(ctx context.Context, path string) Read {
 	switch {
 	case ae.Status == http.StatusNotFound:
 		r.State = ReadOK
-	case ae.Status == http.StatusForbidden && (ae.Code == "Forbidden" || ae.Code == "Authentication_RequestFromNonPremiumTenantOrB2CTenant"),
-		ae.Status == http.StatusBadRequest && ae.Code == "AadPremiumLicenseRequired":
+	case LicenceRefused(err):
 		r.State = ReadLicence
 	case ae.Status == http.StatusForbidden:
 		r.State = ReadPermission
 	}
 	return r
+}
+
+// LicenceRefused reports whether err is one of Graph's licence refusals:
+// 403 Forbidden, 403 Authentication_RequestFromNonPremiumTenantOrB2CTenant
+// or 400 AadPremiumLicenseRequired.
+func LicenceRefused(err error) bool {
+	var ae *APIError
+	return errors.As(err, &ae) && (ae.Status == http.StatusForbidden && (ae.Code == "Forbidden" || ae.Code == "Authentication_RequestFromNonPremiumTenantOrB2CTenant") ||
+		ae.Status == http.StatusBadRequest && ae.Code == "AadPremiumLicenseRequired")
 }
 
 // licence maps a licence read probe to a licence state. A missing

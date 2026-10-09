@@ -33,9 +33,13 @@ func entraSession(t *testing.T, probe *graph.Probe, reply func(r *http.Request) 
 		seen = append(seen, r)
 		mu.Unlock()
 		body := reply(r)
-		if body == "403" {
+		// "403" answers Authorization_RequestDenied, "403 Code" that code.
+		if code, ok := strings.CutPrefix(body, "403"); ok {
+			if code = strings.TrimSpace(code); code == "" {
+				code = "Authorization_RequestDenied"
+			}
 			w.WriteHeader(http.StatusForbidden)
-			body = `{"error":{"code":"Authorization_RequestDenied","message":"no"}}`
+			body = `{"error":{"code":"` + code + `","message":"no"}}`
 		}
 		io.WriteString(w, body)
 	}))
@@ -89,6 +93,10 @@ func TestEntraReadRosterRegisters(t *testing.T) {
 		"entra_role":    {"definitions", "assignments", "eligibility"},
 		"entra_license": {"skus"},
 		"entra_org":     {"info"},
+		"entra_audit":   {"search"},
+		"entra_signin":  {"search"},
+		"entra_risk":    {"risky_users", "risk_detections"},
+		"entra_policy":  {"conditional_access", "named_locations", "auth_methods_policy", "security_defaults"},
 	} {
 		if !slices.Equal(got[name], want) {
 			t.Errorf("%s: actions %v, want %v", name, got[name], want)

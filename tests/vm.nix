@@ -9,7 +9,8 @@
 #                            subscribedSkus (no P1), managedDevices and signIns (403);
 #                            /users in two nextLink pages, the second 429 once;
 #                            a user by id or UPN, a group's members, /devices,
-#                            /beta/organization, and apps and SPs with credentials
+#                            /beta/organization, apps and SPs with credentials, and
+#                            directory audit events (activityDisplayName filters)
 #   microsoft-directory-mcp  the module's HTTP service
 #
 # One full MCP session calls ad_status (a simple bind over LDAPS, trusting
@@ -37,8 +38,8 @@ let
   # The certificate half of the Entra fixture, readable by the stub.
   certPublic = "/run/entra-cert-public.pem";
   # An unsigned JWT the server decodes for the startup probe. Payload:
-  # {"aud":"https://graph.microsoft.com","roles":["Organization.Read.All","User.Read.All","LicenseAssignment.Read.All","GroupMember.Read.All","Device.Read.All","Application.Read.All"]}
-  accessToken = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJhdWQiOiJodHRwczovL2dyYXBoLm1pY3Jvc29mdC5jb20iLCJyb2xlcyI6WyJPcmdhbml6YXRpb24uUmVhZC5BbGwiLCJVc2VyLlJlYWQuQWxsIiwiTGljZW5zZUFzc2lnbm1lbnQuUmVhZC5BbGwiLCJHcm91cE1lbWJlci5SZWFkLkFsbCIsIkRldmljZS5SZWFkLkFsbCIsIkFwcGxpY2F0aW9uLlJlYWQuQWxsIl19.stub";
+  # {"aud":"https://graph.microsoft.com","roles":["Organization.Read.All","User.Read.All","LicenseAssignment.Read.All","GroupMember.Read.All","Device.Read.All","Application.Read.All","AuditLog.Read.All"]}
+  accessToken = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJhdWQiOiJodHRwczovL2dyYXBoLm1pY3Jvc29mdC5jb20iLCJyb2xlcyI6WyJPcmdhbml6YXRpb24uUmVhZC5BbGwiLCJVc2VyLlJlYWQuQWxsIiwiTGljZW5zZUFzc2lnbm1lbnQuUmVhZC5BbGwiLCJHcm91cE1lbWJlci5SZWFkLkFsbCIsIkRldmljZS5SZWFkLkFsbCIsIkFwcGxpY2F0aW9uLlJlYWQuQWxsIiwiQXVkaXRMb2cuUmVhZC5BbGwiXX0.stub";
 
   # Seed data, ldbadd-ed into sam.ldb at provisioning: 250 users (more than
   # one page), vm-team with five users and the nested vm-sub (two more);
@@ -163,6 +164,14 @@ let
     SEED["servicePrincipals"] = [{"id": "00000000-0000-0000-0000-000000000502", "appId": "00000000-0000-0000-0000-000000000601",
                                   "displayName": "vm-app", "passwordCredentials": [], "keyCredentials": [
                                       {"keyId": "00000000-0000-0000-0000-000000000703", "endDateTime": days(-1), "key": "MIIC"}]}]
+    # Directory audit events: a user added, then password writeback enabled.
+    SEED["directoryAudits"] = [
+        {"id": "audit-2", "activityDateTime": "2026-01-02T00:00:00Z", "activityDisplayName": "Enable password writeback for directory",
+         "category": "DirectoryManagement", "result": "success", "initiatedBy": {}, "targetResources": []},
+        {"id": "audit-1", "activityDateTime": "2026-01-01T00:00:00Z", "activityDisplayName": "Add user", "category": "UserManagement",
+         "result": "success", "initiatedBy": {"user": {"userPrincipalName": "admin@example.com"}},
+         "targetResources": [{"id": "00000000-0000-0000-0000-000000000101", "displayName": "Entra User 1", "modifiedProperties": []}]},
+    ]
     # A group of user 1 and the device.
     SEED["members"] = {"00000000-0000-0000-0000-000000000401": [SEED["users"][0], SEED["devices"][0]]}
     THROTTLED = set()
@@ -257,6 +266,12 @@ let
         h.reply(200, {"value": SEED["members"][key]})
 
 
+    def audits(h, query):
+        """Honours only activityDisplayName eq filters: an event is kept if its name is quoted in $filter."""
+        f = query.get("$filter", [""])[0]
+        h.reply(200, {"value": [e for e in SEED["directoryAudits"] if not f or "'" + e["activityDisplayName"] + "'" in f]})
+
+
     def no_premium(h, query):
         h.error(403, "Authentication_RequestFromNonPremiumTenantOrB2CTenant",
                 "Neither tenant is B2C or tenant doesn't have premium license")
@@ -268,6 +283,7 @@ let
         ("GET", "/v1.0/subscribedSkus"): listing("subscribedSkus"),
         ("GET", "/v1.0/deviceManagement/managedDevices"): listing("managedDevices"),
         ("GET", "/v1.0/auditLogs/signIns"): no_premium,
+        ("GET", "/v1.0/auditLogs/directoryAudits"): audits,
         ("GET", "/v1.0/users"): users,
         ("GET", "/v1.0/devices"): listing("devices"),
         ("GET", "/v1.0/applications"): listing("applications"),
@@ -372,7 +388,7 @@ let
     _, listed = post({"jsonrpc": "2.0", "id": next(ids), "method": "tools/list"}, session)
     tools = sorted(t["name"] for t in listed["result"]["tools"])
     assert tools == ["ad_api", "ad_computer", "ad_gpo", "ad_group", "ad_object", "ad_ou", "ad_policy", "ad_status", "ad_topology", "ad_user",
-                     "entra_api", "entra_app", "entra_device", "entra_group", "entra_license", "entra_org", "entra_status", "entra_user"], tools
+                     "entra_api", "entra_app", "entra_audit", "entra_device", "entra_group", "entra_license", "entra_org", "entra_status", "entra_user"], tools
 
     ad = call("ad_status", {})
     print("ad_status", json.dumps(ad))
@@ -392,14 +408,18 @@ let
     # The startup probe: the roles claim decoded, P1 absent from subscribedSkus,
     # Intune present from its read probe. Later issues assert their hidden actions.
     probe = entra["probe"]
-    assert probe["roles"] == ["Organization.Read.All", "User.Read.All", "LicenseAssignment.Read.All", "GroupMember.Read.All", "Device.Read.All", "Application.Read.All"], probe
+    assert probe["roles"] == ["Organization.Read.All", "User.Read.All", "LicenseAssignment.Read.All", "GroupMember.Read.All", "Device.Read.All", "Application.Read.All", "AuditLog.Read.All"], probe
     assert probe["licences"] == {"P1": "absent", "P2": "absent", "Intune": "present"}, probe
     assert "group_reads" not in probe and "notes" not in probe, probe
     assert entra["enabled_groups"] == ["core", "identity", "security", "policy", "devices", "infra"], entra
     assert entra["password_writeback"] == {"value": "on", "source": "operator-declared"}, entra
-    hidden = sorted(h["tool"] + " " + h["action"] for h in entra["hidden_actions"])
-    assert hidden == ["entra_device managed_get", "entra_device managed_search", "entra_role assignments", "entra_role definitions",
-                      "entra_role eligibility", "entra_user auth_methods", "entra_user registration"], hidden
+    hidden = {h["tool"] + " " + h["action"]: h["reason"] for h in entra["hidden_actions"]}
+    assert sorted(hidden) == ["entra_device managed_get", "entra_device managed_search",
+                              "entra_policy auth_methods_policy", "entra_policy conditional_access", "entra_policy named_locations", "entra_policy security_defaults",
+                              "entra_risk risk_detections", "entra_risk risky_users", "entra_role assignments", "entra_role definitions",
+                              "entra_role eligibility", "entra_signin search", "entra_user auth_methods", "entra_user registration"], sorted(hidden)
+    # AuditLog.Read.All is granted: sign-ins are hidden for the licence alone.
+    assert hidden["entra_signin search"] == "licence: needs P1", hidden
     assert ad["probe"]["bound"], ad
     assert {"dns": "corp.example.com", "netbios": "CORP", "dn": "DC=corp,DC=example,DC=com"} in ad["probe"]["domains"], ad
     assert ad["probe"]["reads"] == {"pso-read": "ok"}, ad["probe"]
@@ -529,8 +549,16 @@ let
     print("entra_org info", json.dumps(org))
     assert org["displayName"] == "Example Org" and org["onPremisesSyncEnabled"] is True, org
     assert org["password_writeback"]["value"] == "on" and org["password_writeback"]["source"] == "operator-declared", org
-    # No AuditLog.Read.All in the token: the audit hint is unknown.
-    assert org["password_writeback"]["audit_hint"]["value"] == "unknown", org
+    # The audit hint: the seeded Enable password writeback event.
+    assert org["password_writeback"]["audit_hint"]["value"] == "enabled", org
+
+    # The directory audit log, cut to the brief; a filter on the activity.
+    audit = call("entra_audit", {"action": "search"})
+    print("entra_audit search", json.dumps(audit))
+    assert [a["activityDisplayName"] for a in audit["results"]] == ["Enable password writeback for directory", "Add user"], audit
+    assert audit["results"][1]["targetResources"] == [{"displayName": "Entra User 1"}] and "id" not in audit["results"][1], audit
+    added = call("entra_audit", {"action": "search", "filter": "activityDisplayName eq 'Add user'"})["results"]
+    assert [a["initiatedBy"]["user"]["userPrincipalName"] for a in added] == ["admin@example.com"], added
     print("ok")
   '';
 

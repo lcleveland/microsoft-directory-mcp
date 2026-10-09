@@ -24,6 +24,9 @@ type Params struct {
 	Sort   string   `json:"sort,omitempty"`   // $orderby
 	Fields []string `json:"fields,omitempty"` // $select
 	Expand string   `json:"-"`                // $expand, fixed by the action
+	// Shape, if set, cuts each item before the page caps count it: for
+	// collections that refuse $select.
+	Shape func(map[string]any) map[string]any `json:"-"`
 }
 
 var (
@@ -167,6 +170,11 @@ func (c *Client) Fetch(ctx context.Context, path string, p Params, cursorIn stri
 		return nil, obj, err
 	}
 	rest := items[min(cur.Skip, len(items)):]
+	if p.Shape != nil {
+		for i, r := range rest {
+			rest[i] = p.Shape(r)
+		}
+	}
 	kept, trunc := paging.Trim(rest[:min(len(rest), paging.Size)])
 	page = &Page{Results: append([]map[string]any{}, rest[:kept]...), Truncation: trunc}
 	switch {
