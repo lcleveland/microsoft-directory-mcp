@@ -70,7 +70,7 @@ func TestClassifyEntra(t *testing.T) {
 
 // Users the stub knows: u1 cloud-only, u2 synced, u3 a directory role
 // holder by membership, u4 in a role-assignable group, u5 owning one, u6
-// assigned a custom role scoped to an admin unit.
+// assigned a custom role scoped to an admin unit, u7 owning an application.
 const (
 	u1 = "00000000-0000-0000-0000-000000000001"
 	u2 = "00000000-0000-0000-0000-000000000002"
@@ -78,6 +78,7 @@ const (
 	u4 = "00000000-0000-0000-0000-000000000004"
 	u5 = "00000000-0000-0000-0000-000000000005"
 	u6 = "00000000-0000-0000-0000-000000000006"
+	u7 = "00000000-0000-0000-0000-000000000007"
 )
 
 // Groups the stub knows: g1 cloud-only, g2 synced, g3 role-assignable; m1
@@ -114,6 +115,8 @@ func entraWriteStub(write string) func(*http.Request) string {
 			return `{"value":[{"@odata.type":"#microsoft.graph.group","id":"g0"},{"@odata.type":"#microsoft.graph.directoryRole","id":"r1","displayName":"Helpdesk Administrator"}]}`
 		case strings.HasSuffix(p, "/transitiveMemberOf") && id == u4, strings.HasSuffix(p, "/ownedObjects") && id == u5:
 			return `{"value":[{"@odata.type":"#microsoft.graph.group","id":"g1","displayName":"tier0","isAssignableToRole":true}]}`
+		case strings.HasSuffix(p, "/ownedObjects") && id == u7:
+			return `{"value":[{"@odata.type":"#microsoft.graph.application","id":"a1","displayName":"backend"}]}`
 		case strings.HasSuffix(p, "/transitiveMemberOf"), strings.HasSuffix(p, "/ownedObjects"):
 			return `{"value":[{"@odata.type":"#microsoft.graph.group","id":"g0","displayName":"staff","isAssignableToRole":false}]}`
 		case strings.HasSuffix(p, "/authentication/methods/"+m1):
@@ -242,6 +245,18 @@ func TestEntraWriteRefusals(t *testing.T) {
 		}
 		if w := writes(); len(w) != 0 {
 			t.Errorf("%s: sent %v", tc.name, w)
+		}
+	}
+}
+
+// A user owning an application is protected: its owner can add a
+// credential to the app and sign in as it, whatever it holds.
+func TestEntraAppOwnerProtected(t *testing.T) {
+	for name, a := range map[string]entraAction{"reset_password": entraResetPassword, "issue_tap": entraIssueTAP, "disable": entraAccountState("disable")} {
+		d, _, writes := entraWriteDeps(t, "", "entra-credentials", "entra-account-state")
+		_, err := entraCall(d, a, entraIn{ID: u7, writeIn: writeIn{Confirm: "user@example.com"}})
+		if err == nil || !strings.Contains(err.Error(), "protected target: it owns the application backend") || len(writes()) != 0 {
+			t.Errorf("%s: %v, wrote %v", name, err, writes())
 		}
 	}
 }

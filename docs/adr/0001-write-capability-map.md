@@ -9,7 +9,7 @@ On top of the capabilities, these rules hold no matter what the operator enables
 
 **Protected targets are refused in code. No capability lifts this.**
 - **AD tier-0:** `adminCount=1`, RID < 1000, `isCriticalSystemObject`, DCs, protected groups and anything nested into them.
-- **Entra admins:** any directory-role holder, and any member or owner of a role-assignable group.
+- **Entra admins:** any directory-role holder, any member or owner of a role-assignable group, and any owner of an application or service principal (its owner can add a credential and act as it, whatever it holds).
 - **Policy reaching a protected target:** a PSO apply that would reach one, editing a PSO that already applies to one, and gPLink or gPOptions changes on the Domain Controllers OU.
 
 As a result the service principal only ever needs User Administrator, never Privileged Authentication Administrator.

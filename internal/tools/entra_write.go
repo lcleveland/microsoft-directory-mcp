@@ -275,7 +275,8 @@ func (d Deps) entraWrite(ctx context.Context, w entraWrite) (map[string]any, err
 
 // entraProtected refuses a protected target: a role-assignable group, or a
 // user or service principal holding a directory role (any role, any scope), in a role-assignable
-// group or owning one. A Graph error fails closed.
+// group or owning one, or owning any application or service principal (whatever it holds: its
+// owner can add a credential and sign in as it). A Graph error fails closed.
 // ponytail: active assignments only; a PIM-eligible holder passes until it
 // activates, and Graph refuses writes on it to a User Administrator.
 // ponytail: a deleted user's memberships and ownerships can't be read, so
@@ -317,6 +318,8 @@ func (d Deps) entraProtected(ctx context.Context, k entraKind, tgt map[string]an
 					return refuse(fmt.Sprintf("holds the directory role %v", r["displayName"]))
 				case r["isAssignableToRole"] == true:
 					return refuse(fmt.Sprintf("%s the role-assignable group %v", how, r["displayName"]))
+				case rel == "/ownedObjects" && (r["@odata.type"] == "#microsoft.graph.application" || r["@odata.type"] == entraSPs.typ):
+					return refuse(fmt.Sprintf("owns the %s %v", strings.TrimPrefix(r["@odata.type"].(string), "#microsoft.graph."), r["displayName"]))
 				}
 			}
 			if cur = p.NextCursor; cur == "" {
@@ -808,7 +811,7 @@ func entraGroupDoc(visible []string) string {
 	if slices.Contains(visible, "add_members") {
 		says = append(says, "add_members and remove_members take members, 1 to 20 object ids (users, groups, devices). An add is one call: if any "+
 			"member is already in, Graph refuses it whole. A remove of one already out is no error. Protected members (directory role holders, "+
-			"members and owners of role-assignable groups) are refused (entra-group-membership)")
+			"members and owners of role-assignable groups, owners of applications and service principals) are refused (entra-group-membership)")
 	}
 	says = append(says, entraObjectsDoc("groups", visible)...)
 	if len(says) == 0 {
@@ -857,7 +860,7 @@ func entraRiskDoc(visible []string) string {
 	}
 	return "\n\nWrites (the entra-risk capability), one user by object id (id from risky_users), with a reason for the audit log: " +
 		"dismiss dismisses the user's risk; confirm_compromised marks the user compromised, raising risk to high so risk policies act. " +
-		"Allowed on users synced from the forest; protected targets (directory role holders, members and owners of role-assignable groups) are refused."
+		"Allowed on users synced from the forest; protected targets (directory role holders, members and owners of role-assignable groups, owners of applications and service principals) are refused."
 }
 
 // entraUserDoc describes the entra_user writes that show, or is "" when
@@ -889,7 +892,7 @@ func entraUserDoc(visible []string) string {
 		return ""
 	}
 	return "\n\nWrites, one user by id (create: none), with a reason for the audit log: " + strings.Join(says, "; ") +
-		". Protected targets (directory role holders, members and owners of role-assignable groups) are refused. On a user synced " +
+		". Protected targets (directory role holders, members and owners of role-assignable groups, owners of applications and service principals) are refused. On a user synced " +
 		"from the forest, disable, enable, edit (but for " + strings.Join(entraCloudProps, ", ") + "), set_manager, remove_manager and delete " +
 		"are refused and name the ad_* action and AD counterpart, and so is reset_password unless the operator declares password " +
 		"writeback on; the rest are allowed."

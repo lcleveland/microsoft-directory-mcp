@@ -84,7 +84,7 @@ All are off by default. Turn them on with `--capabilities a,b,...` (or `capabili
 These hold whatever capabilities are on:
 - **Protected targets are refused in code.**
   - In AD: `adminCount=1`, RID below 1000, `isCriticalSystemObject`, domain controllers, protected groups and anything nested in them.
-  - In Entra: any directory-role holder, and any member or owner of a role-assignable group.
+  - In Entra: any directory-role holder, any member or owner of a role-assignable group, and any owner of an application or service principal.
   - For policy: a PSO apply that would reach a protected target, editing a PSO that already applies to one, and GPO link changes on the Domain Controllers OU.
 - **One target per write, by id.** There is no bulk mode and no selecting targets by filter. Delete, password reset, and Intune retire and wipe need `confirm` set to the target's name.
 - **Every write needs `reason`.** It is audit-logged with the tool, action and target, before the write and again with the outcome. Logs go to stderr.
