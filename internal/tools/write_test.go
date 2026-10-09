@@ -58,15 +58,15 @@ func TestClassifyAD(t *testing.T) {
 // writeDeps is Deps with an audit log in buf, capabilities caps and the
 // transport stubbed: the target pre-reads as e, and the modifies vet
 // returned, i.e. what would have been sent, are recorded.
-func writeDeps(t *testing.T, e *ldap.Entry, caps ...string) (Deps, *bytes.Buffer, *[]*ldap.ModifyRequest) {
+func writeDeps(t *testing.T, e *ldap.Entry, caps ...string) (Deps, *bytes.Buffer, *[]any) {
 	t.Helper()
 	a, err := ad.New(&config.AD{TLS: "ldaps", DCs: []string{"127.0.0.1:1"}}, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var sent []*ldap.ModifyRequest
-	old := adModify
-	adModify = func(_ *ad.Client, _ context.Context, dn, _ string, _ []string, vet func(*ldap.Entry) (*ldap.ModifyRequest, error)) (ad.Target, error) {
+	var sent []any
+	old, oldA := adModify, adAdd
+	adModify = func(_ *ad.Client, _ context.Context, dn, _ string, _ []string, vet func(*ldap.Entry) (any, error)) (ad.Target, error) {
 		if !strings.EqualFold(dn, e.DN) {
 			t.Errorf("wrote %s, want %s", dn, e.DN)
 		}
@@ -76,9 +76,13 @@ func writeDeps(t *testing.T, e *ldap.Entry, caps ...string) (Deps, *bytes.Buffer
 		}
 		return ad.Target{DC: "dc2.corp.example.com:636"}, err
 	}
+	adAdd = func(_ *ad.Client, _ context.Context, req *ldap.AddRequest) (ad.Target, error) {
+		sent = append(sent, req)
+		return ad.Target{DC: "dc2.corp.example.com:636"}, nil
+	}
 	oldP := adProtected
 	adProtected = func(*ad.Client, context.Context, string) (string, error) { return "", nil }
-	t.Cleanup(func() { adModify, adProtected = old, oldP })
+	t.Cleanup(func() { adModify, adAdd, adProtected = old, oldA, oldP })
 	c := map[string]bool{}
 	for _, x := range caps {
 		c[x] = true
@@ -116,7 +120,7 @@ func TestDisableWrites(t *testing.T) {
 	if len(*sent) != 1 {
 		t.Fatalf("sent %d", len(*sent))
 	}
-	got := fmt.Sprint((*sent)[0].Changes)
+	got := fmt.Sprint((*sent)[0].(*ldap.ModifyRequest).Changes)
 	if want := fmt.Sprint([]ldap.Change{
 		{Operation: ldap.DeleteAttribute, Modification: ldap.PartialAttribute{Type: "userAccountControl", Vals: []string{"66048"}}},
 		{Operation: ldap.AddAttribute, Modification: ldap.PartialAttribute{Type: "userAccountControl", Vals: []string{"66050"}}},
@@ -317,7 +321,7 @@ func TestResetPassword(t *testing.T) {
 		if !keep {
 			want = append(want, ldap.Change{Operation: ldap.ReplaceAttribute, Modification: ldap.PartialAttribute{Type: "pwdLastSet", Vals: []string{"0"}}})
 		}
-		if got := (*sent)[0].Changes; fmt.Sprint(got) != fmt.Sprint(want) {
+		if got := (*sent)[0].(*ldap.ModifyRequest).Changes; fmt.Sprint(got) != fmt.Sprint(want) {
 			t.Errorf("keep=%v: changes %v", keep, got)
 		}
 		log := buf.String()
@@ -345,7 +349,7 @@ func TestMembers(t *testing.T) {
 		if out["action"] != tc.action || len(*sent) != 1 {
 			t.Fatalf("%s: %v, sent %d", tc.action, out, len(*sent))
 		}
-		req := (*sent)[0]
+		req := (*sent)[0].(*ldap.ModifyRequest)
 		want := []ldap.Change{{Operation: tc.op, Modification: ldap.PartialAttribute{Type: "member", Vals: []string{ada}}}}
 		if fmt.Sprint(req.Changes) != fmt.Sprint(want) || len(req.Controls) != 1 || req.Controls[0].GetControlType() != ldap.ControlTypeMicrosoftPermissiveModify {
 			t.Errorf("%s: %v %v", tc.action, req.Changes, req.Controls)
@@ -459,6 +463,203 @@ func TestPasswordsAndMembershipRegister(t *testing.T) {
 			}
 		}
 		if slices.Contains(p, "expires") || name == "ad_group" && slices.Contains(p, "confirm") {
+			t.Errorf("%s shows a parameter of a write it lacks: %v", name, p)
+		}
+	}
+}
+
+// The ad-objects allowlist is descriptive only, per class: nothing that
+// grants access, delegates, or changes sign-in is ever on it, and ad_api
+// and ad_object edit refuse anything off it.
+func TestObjectAllowlist(t *testing.T) {
+	for class, attrs := range adObjectAttrs {
+		for _, never := range []string{"userAccountControl", "servicePrincipalName", "msDS-KeyCredentialLink", "sIDHistory",
+			"msDS-AllowedToActOnBehalfOfOtherIdentity", "msDS-AllowedToDelegateTo", "nTSecurityDescriptor", "adminCount",
+			"unicodePwd", "primaryGroupID", "userPrincipalName", "scriptPath", "member", "groupType"} {
+			if slices.ContainsFunc(attrs, func(a string) bool { return strings.EqualFold(a, never) }) {
+				t.Errorf("%s allows %s", class, never)
+			}
+		}
+	}
+	for _, tc := range []struct {
+		class, attr string
+		ok          bool
+	}{{"user", "title", true}, {"user", "TITLE", true}, {"group", "title", false}, {"group", "description", true},
+		{"computer", "location", true}, {"computer", "title", false}, {"organizationalUnit", "description", false}} {
+		_, err := classifyAD("modify", tc.attr, tc.class, true)
+		if (err == nil) != tc.ok {
+			t.Errorf("%s on %s: %v", tc.attr, tc.class, err)
+		}
+	}
+	for _, attrs := range []map[string]string{{"title": "x", "servicePrincipalName": "HTTP/x"}, {"userAccountControl": "512"}} {
+		d, _, sent := writeDeps(t, adaEntry(nil), "ad-objects", "ad-account-state")
+		if _, err := d.edit(context.Background(), adIn{ID: ada, Attributes: attrs, writeIn: writeIn{Reason: "r"}}); err == nil || len(*sent) != 0 {
+			t.Errorf("edit %v: %v, sent %d", attrs, err, len(*sent))
+		}
+	}
+	d, _, sent := writeDeps(t, adaEntry(nil), "ad-objects")
+	if _, err := d.edit(context.Background(), adIn{ID: ada, Attributes: map[string]string{"title": "Engineer", "info": ""},
+		writeIn: writeIn{Reason: "r"}}); err != nil || len(*sent) != 1 {
+		t.Fatalf("edit: %v", err)
+	}
+	if got, want := fmt.Sprint((*sent)[0].(*ldap.ModifyRequest).Changes), fmt.Sprint([]ldap.Change{
+		{Operation: ldap.ReplaceAttribute, Modification: ldap.PartialAttribute{Type: "info"}},
+		{Operation: ldap.ReplaceAttribute, Modification: ldap.PartialAttribute{Type: "title", Vals: []string{"Engineer"}}},
+	}); got != want {
+		t.Errorf("changes %s, want %s", got, want)
+	}
+}
+
+// A created user gets a generated password, must change it, and is
+// enabled, in one add; the reply returns the password once and the audit
+// log never has it. Off-allowlist attributes refuse the create.
+func TestCreate(t *testing.T) {
+	d, buf, sent := writeDeps(t, adaEntry(nil), "ad-objects")
+	const ou = "OU=Staff,DC=corp,DC=example,DC=com"
+	out, err := d.create(context.Background(), "ad_user", "user", adIn{Parent: ou, Name: "Grace, H", Sam: "grace", UPN: "grace@example.com",
+		Attributes: map[string]string{"displayName": "Grace Hopper"}, writeIn: writeIn{Reason: "r"}}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pw, _ := out["password"].(string)
+	if out["dn"] != `CN=Grace\, H,`+ou || out["must_change"] != true || len(pw) < 20 || out["dc"] == nil {
+		t.Errorf("reply %v", out)
+	}
+	req := (*sent)[0].(*ldap.AddRequest)
+	got := map[string][]string{}
+	for _, a := range req.Attributes {
+		got[a.Type] = a.Vals
+	}
+	if got["sAMAccountName"][0] != "grace" || got["userAccountControl"][0] != "512" || got["pwdLastSet"][0] != "0" ||
+		got["userPrincipalName"][0] != "grace@example.com" || got["unicodePwd"][0] != unicodePwd(secret(pw)) || got["displayName"][0] != "Grace Hopper" {
+		t.Errorf("add %v", got)
+	}
+	if log := buf.String(); strings.Contains(log, pw) || !strings.Contains(log, "capability=ad-objects") || !strings.Contains(log, "outcome=ok") {
+		t.Errorf("audit log:\n%s", log)
+	}
+
+	_, err = d.create(context.Background(), "ad_group", "group", adIn{Parent: ou, Name: "team", writeIn: writeIn{Reason: "r"}}, "-2147483646")
+	req = (*sent)[1].(*ldap.AddRequest)
+	if err != nil || fmt.Sprint(req.Attributes) != fmt.Sprint([]ldap.Attribute{{Type: "objectClass", Vals: []string{"group"}},
+		{Type: "sAMAccountName", Vals: []string{"team"}}, {Type: "groupType", Vals: []string{"-2147483646"}}}) {
+		t.Errorf("group: %v %v", err, req.Attributes)
+	}
+	_, err = d.create(context.Background(), "ad_computer", "computer", adIn{Parent: ou, Name: "pc1", writeIn: writeIn{Reason: "r"}}, "")
+	got = map[string][]string{}
+	for _, a := range (*sent)[2].(*ldap.AddRequest).Attributes {
+		got[a.Type] = a.Vals
+	}
+	if err != nil || got["sAMAccountName"][0] != "pc1$" || got["userAccountControl"][0] != "4096" || len(got["unicodePwd"]) != 1 {
+		t.Errorf("computer: %v %v", err, got)
+	}
+
+	for name, in := range map[string]adIn{
+		"spn":       {Parent: ou, Name: "x", Attributes: map[string]string{"servicePrincipalName": "HTTP/x"}, writeIn: writeIn{Reason: "r"}},
+		"no parent": {Name: "x", writeIn: writeIn{Reason: "r"}},
+		"no reason": {Parent: ou, Name: "x"},
+	} {
+		if _, err := d.create(context.Background(), "ad_user", "user", in, ""); err == nil {
+			t.Errorf("%s: created", name)
+		}
+	}
+	if len(*sent) != 3 {
+		t.Errorf("sent %d", len(*sent))
+	}
+}
+
+// Delete is a plain leaf delete (never a tree delete) with confirm, and
+// warns about sync; restore reanimates with show-deleted; a move warns
+// about sync scope only when there is a counterpart.
+func TestDeleteRestoreMove(t *testing.T) {
+	d, _, sent := writeDeps(t, adaEntry(nil), "ad-delete", "ad-objects")
+	ctx := context.Background()
+	if _, err := d.deleteObject(ctx, adIn{ID: ada, writeIn: writeIn{Reason: "r", Confirm: "bob"}}); err == nil || len(*sent) != 0 {
+		t.Errorf("confirm mismatch: %v", err)
+	}
+	out, err := d.deleteObject(ctx, adIn{ID: ada, writeIn: writeIn{Reason: "r", Confirm: "ada"}})
+	if err != nil || !strings.Contains(fmt.Sprint(out["warning"]), "sync") {
+		t.Fatalf("delete: %v %v", out, err)
+	}
+	if del, ok := (*sent)[0].(*ldap.DelRequest); !ok || del.DN != ada || len(del.Controls) != 0 {
+		t.Errorf("delete sent %#v", (*sent)[0])
+	}
+
+	const gone = `CN=ada\0ADEL:6d2a1c3e-0000-4000-8000-000000000001,CN=Deleted Objects,DC=corp,DC=example,DC=com`
+	d, _, sent = writeDeps(t, ldap.NewEntry(gone, map[string][]string{"objectClass": {"top", "user"}, "isDeleted": {"TRUE"},
+		"lastKnownParent": {"CN=Users,DC=corp,DC=example,DC=com"}}), "ad-delete")
+	out, err = d.restore(ctx, adIn{ID: gone, writeIn: writeIn{Reason: "r"}})
+	if err != nil || out["restored_as"] != ada {
+		t.Fatalf("restore: %v %v", out, err)
+	}
+	m := (*sent)[0].(*ldap.ModifyRequest)
+	if fmt.Sprint(m.Changes) != fmt.Sprint([]ldap.Change{
+		{Operation: ldap.DeleteAttribute, Modification: ldap.PartialAttribute{Type: "isDeleted"}},
+		{Operation: ldap.ReplaceAttribute, Modification: ldap.PartialAttribute{Type: "distinguishedName", Vals: []string{ada}}},
+	}) || len(m.Controls) != 1 || m.Controls[0].GetControlType() != ldap.ControlTypeMicrosoftShowDeleted {
+		t.Errorf("restore sent %v %v", m.Changes, m.Controls)
+	}
+
+	sidB, _ := ad.SIDBytes(testSID)
+	for _, synced := range []bool{false, true} {
+		d, _, sent := writeDeps(t, adaEntry(map[string][]string{"objectSid": {string(sidB)}}), "ad-objects")
+		if synced {
+			d.Graph, _ = graphStub(t, func(r *http.Request) string {
+				if strings.HasSuffix(r.URL.Path, "/onPremisesSyncBehavior") {
+					return `{"isCloudManaged":false}`
+				}
+				return `{"value":[{"id":"u1","onPremisesSyncEnabled":true}]}`
+			})
+		}
+		out, err := d.moveOrRename(ctx, adIn{ActionParam: ActionParam{"move"}, ID: ada, Parent: "OU=Staff,DC=corp,DC=example,DC=com", writeIn: writeIn{Reason: "r"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, warned := out["warning"]; warned != synced {
+			t.Errorf("synced=%v: %v", synced, out)
+		}
+		if r := (*sent)[0].(*ldap.ModifyDNRequest); r.NewRDN != "CN=ada" || r.NewSuperior != "OU=Staff,DC=corp,DC=example,DC=com" || !r.DeleteOldRDN {
+			t.Errorf("move sent %+v", r)
+		}
+	}
+	d, _, sent = writeDeps(t, adaEntry(nil), "ad-objects")
+	if _, err := d.moveOrRename(ctx, adIn{ActionParam: ActionParam{"rename"}, ID: ada, Name: "Ada L", writeIn: writeIn{Reason: "r"}}); err != nil {
+		t.Fatal(err)
+	}
+	if r := (*sent)[0].(*ldap.ModifyDNRequest); r.NewRDN != "CN=Ada L" || r.NewSuperior != "" {
+		t.Errorf("rename sent %+v", r)
+	}
+	if out, _ := d.moveOrRename(ctx, adIn{ActionParam: ActionParam{"rename"}, ID: ada, Name: "Ada, L", writeIn: writeIn{Reason: "r"}}); out["dn"] != `CN=Ada\, L,CN=Users,DC=corp,DC=example,DC=com` {
+		t.Errorf("rename reply %v", out)
+	}
+}
+
+// With ad-objects and ad-delete on, the AD tools show create, and
+// ad_object its writes with their parameters.
+func TestObjectsAndDeleteRegister(t *testing.T) {
+	cs := writeSession(t, "ad-objects", "ad-delete")
+	got := listed(t, cs)
+	for name, want := range map[string][]string{
+		"ad_user":     {"search", "get", "resultant_policy", "lockout", "create"},
+		"ad_computer": {"search", "get", "create"},
+		"ad_group":    {"search", "get", "members", "create"},
+		"ad_object":   {"get", "search_deleted", "edit", "rename", "move", "delete", "restore"},
+	} {
+		if !slices.Equal(got[name], want) {
+			t.Errorf("%s: %v, want %v", name, got[name], want)
+		}
+	}
+	for name, want := range map[string][]string{
+		"ad_user":   {"reason", "parent", "name", "sam_account_name", "upn", "attributes"},
+		"ad_group":  {"reason", "parent", "name", "group_scope", "distribution"},
+		"ad_object": {"reason", "confirm", "parent", "name", "attributes"},
+	} {
+		p := props(t, cs, name)
+		for _, w := range want {
+			if !slices.Contains(p, w) {
+				t.Errorf("%s lacks %s: %v", name, w, p)
+			}
+		}
+		if slices.Contains(p, "must_change") || slices.Contains(p, "members") || name != "ad_object" && slices.Contains(p, "confirm") {
 			t.Errorf("%s shows a parameter of a write it lacks: %v", name, p)
 		}
 	}

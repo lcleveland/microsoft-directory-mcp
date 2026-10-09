@@ -68,7 +68,7 @@ func seedProtected(f *fakeDir) map[string]string {
 	return cases
 }
 
-func describe(e *ldap.Entry) (*ldap.ModifyRequest, error) {
+func describe(e *ldap.Entry) (any, error) {
 	req := ldap.NewModifyRequest(e.DN, nil)
 	req.Replace("description", []string{"x"})
 	return req, nil
@@ -109,7 +109,7 @@ func TestModifyRails(t *testing.T) {
 
 	// vet refusing sends nothing; a wrong class matches nothing.
 	boom := errors.New("confirm mismatch")
-	if _, err := c.Modify(ctx, plain, userClass, nil, func(*ldap.Entry) (*ldap.ModifyRequest, error) { return nil, boom }); !errors.Is(err, boom) {
+	if _, err := c.Modify(ctx, plain, userClass, nil, func(*ldap.Entry) (any, error) { return nil, boom }); !errors.Is(err, boom) {
 		t.Errorf("vet error: %v", err)
 	}
 	if _, err := c.Modify(ctx, plain, "(objectClass=computer)", nil, describe); !errors.Is(err, ErrNoMatch) {
@@ -132,8 +132,8 @@ func TestModifyCompareAndSwap(t *testing.T) {
 	f := newFakeDir()
 	seedProtected(f)
 	c := f.client(srvConfig())
-	cas := func(old, new string) func(*ldap.Entry) (*ldap.ModifyRequest, error) {
-		return func(e *ldap.Entry) (*ldap.ModifyRequest, error) {
+	cas := func(old, new string) func(*ldap.Entry) (any, error) {
+		return func(e *ldap.Entry) (any, error) {
 			req := ldap.NewModifyRequest(e.DN, nil)
 			req.Delete("userAccountControl", []string{old})
 			req.Add("userAccountControl", []string{new})

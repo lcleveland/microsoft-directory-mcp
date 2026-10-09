@@ -86,9 +86,14 @@ func (s stubConn) Search(r *ldap.SearchRequest) (*ldap.SearchResult, error) {
 	return s.list, s.err
 }
 func (stubConn) Modify(*ldap.ModifyRequest) error { return errors.New("stub: read only") }
-func (stubConn) IsClosing() bool                  { return false }
-func (stubConn) SetTimeout(time.Duration)         {}
-func (stubConn) Close() error                     { return nil }
+func (stubConn) Add(*ldap.AddRequest) error       { return errors.New("stub: read only") }
+func (stubConn) Del(*ldap.DelRequest) error       { return errors.New("stub: read only") }
+func (stubConn) ModifyDN(*ldap.ModifyDNRequest) error {
+	return errors.New("stub: read only")
+}
+func (stubConn) IsClosing() bool          { return false }
+func (stubConn) SetTimeout(time.Duration) {}
+func (stubConn) Close() error             { return nil }
 
 func TestPSOProbe(t *testing.T) {
 	root := &RootDSE{DefaultNamingContext: corpDN}
