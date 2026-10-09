@@ -15,7 +15,49 @@ let
     literalExpression
     ;
   cfg = config.services.microsoft-directory-mcp;
+  # Keep in step with config.Groups and config.Capabilities; the
+  # module-flags-sync check compares them with the binary's --help.
+  groups = [
+    "core"
+    "identity"
+    "security"
+    "policy"
+    "devices"
+    "infra"
+  ];
+  # The write capability map, docs/adr/0001.
+  capabilities = [
+    "ad-account-state"
+    "ad-passwords"
+    "ad-group-membership"
+    "ad-objects"
+    "ad-delete"
+    "ad-gpo-links"
+    "ad-password-policy"
+    "entra-account-state"
+    "entra-credentials"
+    "entra-group-membership"
+    "entra-objects"
+    "entra-delete"
+    "entra-licenses"
+    "entra-devices"
+    "entra-risk"
+    "intune-device-actions"
+    "intune-retire-wipe"
+  ];
+  # "host:port" or "[v6]:port" -> [ host port ], as Go's net.SplitHostPort.
+  v6 = builtins.match "\\[([^]]+)]:([0-9]+)" cfg.http.addr;
+  addrParts = if v6 != null then v6 else builtins.match "([^]:[]*):([0-9]+)" cfg.http.addr;
+  host = lib.elemAt addrParts 0;
+  port = lib.elemAt addrParts 1;
+  validAddr = addrParts != null && lib.toInt port >= 1 && lib.toInt port <= 65535;
+  # config.go's loopback(), minus IPv4-mapped and expanded IPv6 forms.
+  isLoopback =
+    host == "localhost"
+    || host == "::1"
+    || builtins.match "127\\.[0-9]+\\.[0-9]+\\.[0-9]+" host != null;
   inStore = p: p != null && lib.hasPrefix builtins.storeDir p;
+  absolute = p: p == null || lib.hasPrefix "/" p;
   str = types.nullOr types.str;
   opt =
     flag: description:
@@ -49,7 +91,11 @@ let
     "--tool-groups"
     (lib.concatStringsSep "," cfg.toolGroups)
   ]
-  ++ optional (!cfg.probe) "--no-probe"
+  ++ optionals (cfg.capabilities != [ ]) [
+    "--capabilities"
+    (lib.concatStringsSep "," cfg.capabilities)
+  ]
+  ++ optional cfg.noProbe "--no-probe"
   ++ optionals adOn (
     arg "ad-forest" cfg.ad.forest
     ++ arg "ad-bind-user" cfg.ad.bindUser
@@ -59,7 +105,10 @@ let
       "--ad-tls"
       cfg.ad.tls
     ]
-    ++ arg "ad-ca-file" cfg.ad.caFile
+    ++ optionals (cfg.ad.caFile != null) [
+      "--ad-ca-file"
+      "%d/ad-ca"
+    ]
     ++ optional cfg.ad.insecureSkipVerify "--ad-insecure-skip-verify"
     ++ arg "ad-site" cfg.ad.site
     ++ optionals (cfg.ad.dcs != [ ]) [
@@ -120,7 +169,7 @@ in
         default = "ldaps";
         description = "TLS mode (`--ad-tls`). Plain LDAP is never used.";
       };
-      caFile = opt "ad-ca-file" "PEM CA bundle added to the system roots";
+      caFile = opt "ad-ca-file" "Runtime path to a PEM CA bundle added to the system roots, passed via systemd `LoadCredential`";
       insecureSkipVerify = mkOption {
         type = types.bool;
         default = false;
@@ -162,8 +211,8 @@ in
           Check Password reset > On-premises integration in the Entra admin center.
         '';
       };
-      loginUrl = opt "entra-login-url" "Login base URL override, for tests";
-      graphUrl = opt "entra-graph-url" "Graph base URL override, for tests";
+      loginUrl = opt "entra-login-url" "Login base URL override, for tests; only with the global cloud";
+      graphUrl = opt "entra-graph-url" "Graph base URL override, for tests; only with the global cloud";
     };
 
     http = {
@@ -181,30 +230,20 @@ in
     };
 
     toolGroups = mkOption {
-      type = types.listOf (
-        types.enum [
-          "core"
-          "identity"
-          "security"
-          "policy"
-          "devices"
-          "infra"
-        ]
-      );
-      default = [
-        "core"
-        "identity"
-        "security"
-        "policy"
-        "devices"
-        "infra"
-      ];
+      type = types.listOf (types.enum groups);
+      default = groups;
       description = "Tool groups to enable (`--tool-groups`). core is always on.";
     };
-    probe = mkOption {
+    capabilities = mkOption {
+      type = types.listOf (types.enum capabilities);
+      default = [ ];
+      example = [ "ad-account-state" ];
+      description = "Write capabilities to enable (`--capabilities`), all off by default; see docs/adr/0001.";
+    };
+    noProbe = mkOption {
       type = types.bool;
-      default = true;
-      description = "Run the startup probe that hides actions the server can't perform. false passes `--no-probe` and shows everything.";
+      default = false;
+      description = "Skip the startup probe that hides actions the server can't perform, and show everything (`--no-probe`).";
     };
 
     requestTimeout = mkOption {
@@ -255,6 +294,34 @@ in
           message = "services.microsoft-directory-mcp.entra.clientId is required with entra.tenant.";
         }
         {
+          assertion =
+            !entraOn
+            || cfg.entra.cloud == "global"
+            || (cfg.entra.loginUrl == null && cfg.entra.graphUrl == null);
+          message = "services.microsoft-directory-mcp: entra.loginUrl and entra.graphUrl only work with entra.cloud = \"global\".";
+        }
+        {
+          assertion = lib.all absolute [
+            cfg.ad.bindPasswordFile
+            cfg.ad.caFile
+            cfg.entra.certFile
+            cfg.http.authTokenFile
+          ];
+          message = "services.microsoft-directory-mcp: ad.bindPasswordFile, ad.caFile, entra.certFile and http.authTokenFile must be absolute paths.";
+        }
+        {
+          assertion = validAddr;
+          message = "services.microsoft-directory-mcp.http.addr must be host:port or [v6]:port with a port from 1 to 65535, got ${cfg.http.addr}.";
+        }
+        {
+          assertion = !validAddr || isLoopback || cfg.http.authTokenFile != null;
+          message = "services.microsoft-directory-mcp.http.addr is ${cfg.http.addr} (not loopback) without http.authTokenFile; the server refuses to start unauthenticated on a network address.";
+        }
+        {
+          assertion = lib.hasPrefix "/" cfg.http.path;
+          message = "services.microsoft-directory-mcp.http.path must begin with a slash.";
+        }
+        {
           assertion = lib.all (p: !(inStore p)) [
             cfg.ad.bindPasswordFile
             cfg.entra.certFile
@@ -263,6 +330,10 @@ in
           message = "services.microsoft-directory-mcp: secret files must not live in ${builtins.storeDir}, which is world-readable. Use sops-nix, agenix or a root-owned 0400 file.";
         }
       ];
+
+      warnings =
+        optional (adOn && cfg.ad.insecureSkipVerify)
+          "services.microsoft-directory-mcp.ad.insecureSkipVerify is true: domain controller certificates are not verified, so the bind password can go to an impostor.";
 
       systemd.services.microsoft-directory-mcp = {
         description = "Microsoft directory MCP server";
@@ -277,15 +348,48 @@ in
           RestartSec = 5;
           LoadCredential =
             optional adOn "ad-bind-password:${cfg.ad.bindPasswordFile}"
+            ++ optional (adOn && cfg.ad.caFile != null) "ad-ca:${cfg.ad.caFile}"
             ++ optional entraOn "entra-cert:${cfg.entra.certFile}"
             ++ optional (cfg.http.authTokenFile != null) "http-auth-token:${cfg.http.authTokenFile}";
           DynamicUser = true;
-          # ponytail: minimal; the full sibling hardening lands with the Nix lane issue.
+          AmbientCapabilities = [ "" ];
+          CapabilityBoundingSet = [ "" ];
+          DevicePolicy = "closed";
+          LockPersonality = true;
+          MemoryDenyWriteExecute = true;
           NoNewPrivileges = true;
+          PrivateDevices = true;
           PrivateTmp = true;
+          PrivateUsers = true;
+          ProcSubset = "pid";
+          ProtectClock = true;
+          ProtectControlGroups = true;
           ProtectHome = true;
+          ProtectHostname = true;
+          ProtectKernelLogs = true;
+          ProtectKernelModules = true;
+          ProtectKernelTunables = true;
+          ProtectProc = "invisible";
           ProtectSystem = "strict";
+          RemoveIPC = true;
+          # AF_NETLINK: Go's pure resolver reads interface addresses.
+          RestrictAddressFamilies = [
+            "AF_INET"
+            "AF_INET6"
+            "AF_NETLINK"
+          ];
+          RestrictNamespaces = true;
+          RestrictRealtime = true;
+          RestrictSUIDSGID = true;
+          SystemCallArchitectures = "native";
+          SystemCallFilter = [
+            "@system-service"
+            "~@privileged"
+            "~@resources"
+          ];
           UMask = "0077";
+          SocketBindDeny = "any";
+          SocketBindAllow = mkIf validAddr "tcp:${port}";
         };
       };
     })
