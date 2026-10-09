@@ -33,7 +33,7 @@ type AD struct {
 	CAFile             string // added to the system roots
 	InsecureSkipVerify bool
 	Site               string
-	DCs                []string // static domain controller list
+	DCs                []string // static domain controller list; empty means DNS SRV
 }
 
 // Entra is the tenant side. It is on when --entra-tenant set.
@@ -139,9 +139,8 @@ func Parse(args []string, getenv func(string) string) (*Config, []string, error)
 	str(&a.TLS, "ad-tls", "ldaps", "ldaps|starttls")
 	str(&a.CAFile, "ad-ca-file", "", "PEM CA bundle added to the system roots")
 	fs.BoolVar(&a.InsecureSkipVerify, "ad-insecure-skip-verify", false, "do not verify domain controller certificates")
-	// ponytail: parsed but unused until site-aware discovery (AD transport issue).
-	str(&a.Site, "ad-site", "", "AD site to prefer")
-	str(&dcs, "ad-dc", "", "comma-separated domain controllers (host or host:port)")
+	str(&a.Site, "ad-site", "", "AD site: discovery uses its site-scoped SRV records")
+	str(&dcs, "ad-dc", "", "comma-separated domain controllers (host or host:port), instead of DNS SRV discovery")
 	str(&e.Tenant, "entra-tenant", "", "tenant ID or domain; turns the Entra side on")
 	str(&e.ClientID, "entra-client-id", "", "app registration client ID")
 	str(&certFile, "entra-cert-file", "", "PEM file holding the private key and certificate")
@@ -207,10 +206,6 @@ func Parse(args []string, getenv func(string) string) (*Config, []string, error)
 			if dc = strings.TrimSpace(dc); dc != "" {
 				a.DCs = append(a.DCs, dc)
 			}
-		}
-		// ponytail: static list only; SRV discovery lands with the AD transport issue.
-		if len(a.DCs) == 0 {
-			return nil, nil, errors.New("--ad-dc is required with --ad-forest (DNS discovery is not implemented yet)")
 		}
 		if a.BindPassword, err = readSecret(pwFile); err != nil {
 			return nil, nil, err

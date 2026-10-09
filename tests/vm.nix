@@ -248,6 +248,8 @@ let
     assert ad["dc"] == "${dcHost}:636", ad
     assert ad["root_dse"]["default_naming_context"] == "DC=corp,DC=example,DC=com", ad
     assert "CN=Configuration,DC=corp,DC=example,DC=com" in ad["root_dse"]["naming_contexts"], ad
+    # --ad-dc role detection: the one DC is the domain's PDC emulator.
+    assert ad["domains"] == [{"domain": "corp.example.com", "dc": "${dcHost}:636", "pdc": "${dcHost}:636", "pdc_reachable": True}], ad
 
     entra = call("entra_status", {})
     print("entra_status", json.dumps(entra))

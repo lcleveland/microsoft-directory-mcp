@@ -116,7 +116,6 @@ func TestSideValidation(t *testing.T) {
 	}{
 		{[]string{"--ad-forest", "corp.example.com", "--ad-dc", "dc1", "--ad-bind-password-file", "/x"}, "--ad-bind-user"},
 		{[]string{"--ad-forest", "corp.example.com", "--ad-dc", "dc1", "--ad-bind-user", "u"}, "--ad-bind-password-file"},
-		{[]string{"--ad-forest", "corp.example.com", "--ad-bind-user", "u", "--ad-bind-password-file", "/x"}, "--ad-dc"},
 		{append(adArgs(t), "--ad-tls", "none"), "--ad-tls"},
 		{[]string{"--entra-tenant", "t", "--entra-cert-file", "/x"}, "--entra-client-id"},
 		{[]string{"--entra-tenant", "t", "--entra-client-id", "c"}, "--entra-cert-file"},

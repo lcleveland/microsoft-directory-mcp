@@ -53,7 +53,9 @@ type ADStatus struct {
 	Forest     string      `json:"forest"`
 	BindUser   string      `json:"bind_user"`
 	RootDSE    *ad.RootDSE `json:"root_dse,omitempty"`
-	Detail     string      `json:"detail,omitempty"`
+	// Each domain's serving DC and whether its PDC emulator answers.
+	Domains []ad.DomainStatus `json:"domains,omitempty"`
+	Detail  string            `json:"detail,omitempty"`
 	// The startup probe, absent when --no-probe skipped it.
 	Probe        *ad.Probe `json:"probe,omitempty"`
 	ProbeSkipped bool      `json:"probe_skipped,omitempty"`
@@ -64,8 +66,10 @@ func registerADStatus(s *mcp.Server, d Deps) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:  "ad_status",
 		Title: "Active Directory connectivity check",
-		Description: "Connect to a domain controller over TLS, bind as the service account and read the rootDSE. " +
-			"Reports the bind result, the TLS mode, the domain controller used and the naming contexts, then the " +
+		Description: "Connect to a domain controller of the forest root domain over TLS, bind as the service account " +
+			"and read the rootDSE. Reports the bind result, the TLS mode, the domain controller used and the naming " +
+			"contexts; for every domain, the domain controller serving it and whether its PDC emulator (where writes " +
+			"go) is reachable; then the " +
 			"startup probe (domains, read probes), the enabled tool groups, the visible actions and each hidden " +
 			"action with the reason it is hidden (a missing AD right).\n\n" +
 			"Call this first when another ad_* tool fails: it tells an unreachable domain controller, a TLS " +
@@ -78,18 +82,13 @@ func registerADStatus(s *mcp.Server, d Deps) {
 		if a.InsecureSkipVerify {
 			out.TLSWarning = "TLS verification disabled (--ad-insecure-skip-verify)"
 		}
-		conn, dc, err := d.AD.Dial(ctx)
-		out.DC = dc
+		conn, dc, root, err := d.AD.Root(ctx)
+		out.DC, out.Bound, out.RootDSE = dc, conn != nil, root
 		if err != nil {
 			out.Detail = err.Error()
 			return &mcp.CallToolResult{IsError: true}, out, nil
 		}
-		defer conn.Close()
-		out.Bound = true
-		if out.RootDSE, err = ad.ReadRootDSE(conn); err != nil {
-			out.Detail = err.Error()
-			return &mcp.CallToolResult{IsError: true}, out, nil
-		}
+		out.Domains, _ = d.AD.Status(ctx)
 		return nil, out, nil
 	})
 }

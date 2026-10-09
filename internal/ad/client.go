@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/go-ldap/ldap/v3"
@@ -15,10 +16,34 @@ import (
 	"github.com/lcleveland/microsoft-directory-mcp/internal/config"
 )
 
+// Conn is the part of *ldap.Conn the transport uses; tests fake it.
+type Conn interface {
+	Search(*ldap.SearchRequest) (*ldap.SearchResult, error)
+	IsClosing() bool
+	SetTimeout(time.Duration)
+	Close() error
+}
+
 type Client struct {
 	cfg     *config.AD
 	roots   *x509.CertPool
 	timeout time.Duration
+
+	// Seams for tests: dial connects and binds; lookupSRV resolves one SRV name.
+	dial      func(ctx context.Context, addr string) (Conn, error)
+	lookupSRV func(ctx context.Context, name string) ([]*net.SRV, error)
+
+	loadMu  sync.Mutex
+	domains []Domain // from the crossRefs, once read
+
+	mu     sync.Mutex
+	pool   map[string]pooled   // domain DN, or "" for the GC
+	static map[string]staticDC // --ad-dc host to its detected roles
+}
+
+type pooled struct {
+	conn Conn
+	addr string
 }
 
 // New loads --ad-ca-file into a copy of the system roots.
@@ -36,29 +61,21 @@ func New(cfg *config.AD, timeout time.Duration) (*Client, error) {
 			return nil, fmt.Errorf("--ad-ca-file %s: no PEM certificates", cfg.CAFile)
 		}
 	}
-	return &Client{cfg: cfg, roots: roots, timeout: timeout}, nil
+	c := &Client{cfg: cfg, roots: roots, timeout: timeout, pool: map[string]pooled{}, static: map[string]staticDC{}}
+	c.dial = c.dialTLS
+	c.lookupSRV = func(ctx context.Context, name string) ([]*net.SRV, error) {
+		_, srv, err := net.DefaultResolver.LookupSRV(ctx, "", "", name)
+		return srv, err
+	}
+	return c, nil
 }
 
-// dc is the domain controller to use, as host:port for the TLS mode.
-// ponytail: first static host only; discovery and failover come with the AD transport issue.
-func (c *Client) dc() (host, addr string) {
-	host = c.cfg.DCs[0]
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		return h, host
-	}
-	port := "636"
-	if c.cfg.TLS == "starttls" {
-		port = "389"
-	}
-	return host, net.JoinHostPort(host, port)
-}
-
-// Dial connects over TLS (LDAPS or StartTLS, never plain) and simple-binds.
-// The DC is returned even when the dial or bind fails.
-func (c *Client) Dial(ctx context.Context) (*ldap.Conn, string, error) {
-	host, addr := c.dc()
+// dialTLS connects over TLS (LDAPS or StartTLS, never plain) and simple-binds.
+func (c *Client) dialTLS(ctx context.Context, addr string) (Conn, error) {
+	host, _, _ := net.SplitHostPort(addr)
 	tc := &tls.Config{ServerName: host, RootCAs: c.roots, InsecureSkipVerify: c.cfg.InsecureSkipVerify, MinVersion: tls.VersionTLS12}
 	d := &net.Dialer{Timeout: c.timeout}
+	d.Deadline, _ = ctx.Deadline()
 	var (
 		conn *ldap.Conn
 		err  error
@@ -74,17 +91,16 @@ func (c *Client) Dial(ctx context.Context) (*ldap.Conn, string, error) {
 		conn, err = ldap.DialURL("ldaps://"+addr, ldap.DialWithDialer(d), ldap.DialWithTLSConfig(tc))
 	}
 	if err != nil {
-		return nil, addr, fmt.Errorf("connecting to %s: %w", addr, err)
+		return nil, fmt.Errorf("connecting to %s: %w", addr, err)
 	}
+	// Pooled connections outlive the call that dialed them, so each request
+	// gets --request-timeout rather than this call's deadline.
 	conn.SetTimeout(c.timeout)
-	if deadline, ok := ctx.Deadline(); ok {
-		conn.SetTimeout(time.Until(deadline))
-	}
 	if err := conn.Bind(c.cfg.BindUser, c.cfg.BindPassword); err != nil {
 		conn.Close()
-		return nil, addr, fmt.Errorf("bind as %s: %w", c.cfg.BindUser, err)
+		return nil, fmt.Errorf("bind to %s as %s: %w", addr, c.cfg.BindUser, err)
 	}
-	return conn, addr, nil
+	return conn, nil
 }
 
 // RootDSE holds the rootDSE naming contexts.
@@ -95,13 +111,14 @@ type RootDSE struct {
 	SchemaNamingContext        string   `json:"schema_naming_context"`
 	NamingContexts             []string `json:"naming_contexts"`
 	DNSHostName                string   `json:"dns_host_name,omitempty"`
+	DSServiceName              string   `json:"ds_service_name,omitempty"` // this DC's nTDSDSA object
 }
 
 // ReadRootDSE reads the naming contexts on a bound connection.
-func ReadRootDSE(conn *ldap.Conn) (*RootDSE, error) {
+func ReadRootDSE(conn Conn) (*RootDSE, error) {
 	res, err := conn.Search(ldap.NewSearchRequest("", ldap.ScopeBaseObject, ldap.NeverDerefAliases, 1, 0, false,
 		"(objectClass=*)", []string{"defaultNamingContext", "rootDomainNamingContext", "configurationNamingContext",
-			"schemaNamingContext", "namingContexts", "dnsHostName"}, nil))
+			"schemaNamingContext", "namingContexts", "dnsHostName", "dsServiceName"}, nil))
 	if err != nil {
 		return nil, fmt.Errorf("reading rootDSE: %w", err)
 	}
@@ -116,7 +133,21 @@ func ReadRootDSE(conn *ldap.Conn) (*RootDSE, error) {
 		SchemaNamingContext:        e.GetAttributeValue("schemaNamingContext"),
 		NamingContexts:             e.GetAttributeValues("namingContexts"),
 		DNSHostName:                e.GetAttributeValue("dnsHostName"),
+		DSServiceName:              e.GetAttributeValue("dsServiceName"),
 	}, nil
+}
+
+// readAttr reads one attribute of one object.
+func readAttr(conn Conn, dn, attr string) (string, error) {
+	res, err := conn.Search(ldap.NewSearchRequest(dn, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 1, 0, false,
+		"(objectClass=*)", []string{attr}, nil))
+	if err != nil {
+		return "", fmt.Errorf("reading %s of %s: %w", attr, dn, err)
+	}
+	if len(res.Entries) != 1 {
+		return "", fmt.Errorf("reading %s of %s: %d entries", attr, dn, len(res.Entries))
+	}
+	return res.Entries[0].GetAttributeValue(attr), nil
 }
 
 // Domain is one domain of the forest, from its crossRef.
@@ -129,7 +160,7 @@ type Domain struct {
 // ReadProbe checks one right the bind account may lack (for example
 // "pso-read"). It returns an error only when the right is missing; actions
 // that name it are then hidden.
-type ReadProbe func(conn *ldap.Conn, root *RootDSE) error
+type ReadProbe func(conn Conn, root *RootDSE) error
 
 // ReadProbes are the named read probes the startup probe runs. Tool issues
 // register theirs here.
@@ -145,34 +176,18 @@ type Probe struct {
 	Note    string            `json:"note,omitempty"`
 }
 
-// Probe binds, reads the rootDSE and the domain crossRefs, then runs every
-// ReadProbe.
+// Probe reads the domain crossRefs, binds to a DC of the forest root domain
+// and runs every ReadProbe there.
 func (c *Client) Probe(ctx context.Context) *Probe {
 	p := &Probe{}
-	conn, dc, err := c.Dial(ctx)
+	conn, dc, root, err := c.Root(ctx)
 	p.DC = dc
 	if err != nil {
 		p.Note = err.Error()
 		return p
 	}
-	defer conn.Close()
 	p.Bound = true
-	root, err := ReadRootDSE(conn)
-	if err != nil {
-		p.Note = err.Error()
-		return p
-	}
-	// systemFlags bit 2 (FLAG_CR_NTDS_DOMAIN) marks a domain's crossRef.
-	res, err := conn.Search(ldap.NewSearchRequest("CN=Partitions,"+root.ConfigurationNamingContext, ldap.ScopeSingleLevel,
-		ldap.NeverDerefAliases, 0, 0, false, "(&(objectClass=crossRef)(systemFlags:1.2.840.113556.1.4.803:=2))",
-		[]string{"dnsRoot", "nETBIOSName", "nCName"}, nil))
-	if err != nil {
-		p.Note = "reading crossRefs: " + err.Error()
-	} else {
-		for _, e := range res.Entries {
-			p.Domains = append(p.Domains, Domain{e.GetAttributeValue("dnsRoot"), e.GetAttributeValue("nETBIOSName"), e.GetAttributeValue("nCName")})
-		}
-	}
+	p.Domains, _ = c.Domains(ctx)
 	p.Reads = map[string]string{}
 	for name, rp := range ReadProbes {
 		p.Reads[name] = "ok"
@@ -181,4 +196,18 @@ func (c *Client) Probe(ctx context.Context) *Probe {
 		}
 	}
 	return p
+}
+
+// Root returns the pooled connection to the forest root domain and its rootDSE.
+func (c *Client) Root(ctx context.Context) (Conn, string, *RootDSE, error) {
+	d, err := c.Lookup(ctx, c.cfg.Forest)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	conn, dc, err := c.Conn(ctx, d)
+	if err != nil {
+		return nil, dc, nil, err
+	}
+	root, err := ReadRootDSE(conn)
+	return conn, dc, root, err
 }

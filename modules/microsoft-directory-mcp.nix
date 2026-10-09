@@ -126,12 +126,12 @@ in
         default = false;
         description = "Do not verify domain controller certificates (`--ad-insecure-skip-verify`).";
       };
-      site = opt "ad-site" "AD site to prefer";
+      site = opt "ad-site" "AD site whose site-scoped SRV records discovery uses";
       dcs = mkOption {
         type = types.listOf types.str;
         default = [ ];
         example = [ "dc1.corp.example.com" ];
-        description = "Static domain controller list, host or host:port (`--ad-dc`).";
+        description = "Static domain controller list, host or host:port (`--ad-dc`); empty means DNS SRV discovery.";
       };
     };
 
