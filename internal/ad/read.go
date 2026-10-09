@@ -44,11 +44,20 @@ func (c *Client) Resolve(ctx context.Context, id, class string) (string, error) 
 		if !ok {
 			domain, sam = "", id
 		}
-		dns, _, err := FanOut(ctx, c, domain, func(conn Conn, d Domain) ([]string, error) {
+		dns, skipped, err := FanOut(ctx, c, domain, func(conn Conn, d Domain) ([]string, error) {
 			return searchDNs(conn, d.DN, "(&"+class+"(sAMAccountName="+ldap.EscapeFilter(sam)+"))")
 		})
 		if err != nil {
 			return "", err
+		}
+		// An unreachable domain may hold the same name: a unique match elsewhere
+		// could be the wrong account, and no match could be a wrong answer.
+		if len(skipped) > 0 {
+			var names []string
+			for _, s := range skipped {
+				names = append(names, s.Domain)
+			}
+			return "", fmt.Errorf("%q: can't reach %s to rule out a match there; pass a DN, UPN or SID instead", id, strings.Join(names, ", "))
 		}
 		return one(id, dns)
 	}

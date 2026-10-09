@@ -77,6 +77,21 @@ func TestResolve(t *testing.T) {
 	}
 }
 
+func TestResolveFailsWhenADomainIsDown(t *testing.T) {
+	f := newFakeDir()
+	seedUsers(f)
+	f.kill("dc3.child.corp.example.com", "dc4.child.corp.example.com")
+	c := f.client(srvConfig())
+	// jdoe is unique among reachable domains, solo is only in the dead one:
+	// neither resolves nor reports no match.
+	for _, id := range []string{"jdoe", "solo"} {
+		dn, err := c.Resolve(context.Background(), id, userClass)
+		if err == nil || strings.Contains(err.Error(), "no match") || !strings.Contains(err.Error(), "child.corp.example.com") {
+			t.Errorf("%s: want unreachable child named, got %q %v", id, dn, err)
+		}
+	}
+}
+
 func TestGetReadsFromOwningDomain(t *testing.T) {
 	f := newFakeDir()
 	seedUsers(f)
