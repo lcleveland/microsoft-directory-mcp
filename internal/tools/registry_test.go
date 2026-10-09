@@ -318,6 +318,32 @@ func TestCapabilityGatesWrites(t *testing.T) {
 	}
 }
 
+// The handler's own refusal, past the SDK's enum check: a disabled write
+// names its capability, a hidden action its reason, anything else the
+// visible actions.
+func TestHandlerRefuses(t *testing.T) {
+	a, err := ad.New(&config.AD{TLS: "ldaps", DCs: []string{"127.0.0.1:1"}}, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := Deps{Config: &config.Config{ToolGroups: map[string]bool{"identity": true}}, AD: a,
+		ADProbe: &ad.Probe{Bound: true, Reads: map[string]string{"pso-read": "insufficient access"}}}
+	tool := fakeRoster()[2]
+	visible, _ := d.visibility(tool)
+	for action, says := range map[string]string{
+		"wipe":  "ad_fake wipe is a write the operator has not enabled: it needs the ad-delete capability",
+		"psos":  "ad_fake psos is hidden: AD right: pso-read: insufficient access",
+		"bogus": `action "bogus" is not available on ad_fake (available: get)`,
+	} {
+		if err := d.refuse(tool, visible, action); err == nil || !strings.Contains(err.Error(), says) {
+			t.Errorf("%s: %v", action, err)
+		}
+	}
+	if err := d.refuse(tool, visible, "get"); err != nil {
+		t.Errorf("get: %v", err)
+	}
+}
+
 func text(res *mcp.CallToolResult) string {
 	if res == nil || len(res.Content) == 0 {
 		return ""

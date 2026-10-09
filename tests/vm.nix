@@ -149,7 +149,10 @@ let
             }],
         }],
         "managedDevices": [{"id": "00000000-0000-0000-0000-000000000801", "deviceName": "vm-laptop", "operatingSystem": "Windows"}],
-        "groups": [],
+        # A cloud group; its members are SEED["members"]'s.
+        "groups": [{"@odata.type": "#microsoft.graph.group", "id": "00000000-0000-0000-0000-000000000401",
+                    "displayName": "Entra Group 1", "mail": None, "securityEnabled": True, "mailEnabled": False,
+                    "groupTypes": [], "description": "vm group"}],
         # Two pages of two and one, the second answered 429 once.
         "users": [{"@odata.type": "#microsoft.graph.user",
                    "id": "00000000-0000-0000-0000-00000000010%d" % n,
@@ -310,7 +313,14 @@ let
     def group_members(h, query, key):
         if key not in SEED["members"]:
             return h.error(404, "Request_ResourceNotFound", key)
-        h.reply(200, {"value": SEED["members"][key]})
+        h.reply(200, {"value": SEED["members"][key], "@odata.count": len(SEED["members"][key])})
+
+
+    def group(h, query, key):
+        for g in SEED["groups"]:
+            if key == g["id"]:
+                return h.reply(200, g)
+        h.error(404, "Request_ResourceNotFound", key)
 
 
     def audits(h, query):
@@ -429,6 +439,7 @@ let
         ("POST", re.compile(r"/v1\.0/directory/deletedItems/([^/]+)/restore"), restore),
         ("GET", re.compile(r"/v1\.0/users/([^/]+)/(?:transitiveMemberOf|ownedObjects)"), none),
         ("GET", re.compile(r"/v1\.0/groups/([^/]+)/members"), group_members),
+        ("GET", re.compile(r"/v1\.0/groups/([^/]+)"), group),
         ("GET", re.compile(r"/v1\.0/(users|groups)/[^/]+/onPremisesSyncBehavior"), no_grant),
     ]
     UNAUTHENTICATED = {TOKEN_PATH}
@@ -695,6 +706,14 @@ let
         ("#microsoft.graph.user", "entra-user1@example.com", None),
         ("#microsoft.graph.device", None, "00000000-0000-0000-0000-000000000301")], members
     assert call("entra_device", {"action": "search"})["results"][0]["displayName"] == "entra-device1"
+
+    # entra_group search and get: the seeded cloud group, its member count, and no counterpart to find.
+    groups = call("entra_group", {"action": "search"})["results"]
+    assert [(g["id"], g["displayName"]) for g in groups] == [("00000000-0000-0000-0000-000000000401", "Entra Group 1")], groups
+    eg = call("entra_group", {"action": "get", "id": "00000000-0000-0000-0000-000000000401"})
+    print("entra_group get", json.dumps(eg))
+    assert eg["displayName"] == "Entra Group 1" and eg["description"] == "vm group" and eg["memberCount"] == 2, eg
+    assert eg["counterpart"]["source_of_authority"] == "tenant", eg
     beta = call("entra_api", {"action": "get", "path": "/beta/organization"})
     assert beta["results"][0]["displayName"] == "Example Org" and "beta" in beta["_unstable"], beta
     assert "_unstable" not in call("entra_api", {"action": "get", "path": "/v1.0/organization"})
@@ -726,6 +745,14 @@ let
                                           "ad-gpo-links", "ad-password-policy"], ad
     assert entra["enabled_capabilities"] == ["entra-account-state", "entra-credentials", "entra-group-membership", "entra-objects", "entra-delete",
                                              "entra-licenses", "intune-device-actions", "intune-retire-wipe"], entra
+
+    # entra-devices is off: disable is absent from the schema, not reported hidden, and refused if called anyway.
+    device = next(t for t in listed["result"]["tools"] if t["name"] == "entra_device")
+    assert "disable" not in device["inputSchema"]["properties"]["action"]["enum"], device
+    assert "entra_device disable" not in hidden, hidden
+    why = refused("entra_device", {"action": "disable", "id": "00000000-0000-0000-0000-000000000201", "reason": "vm-test entra-devices off"})
+    print("entra_device disable", why)
+    assert "disable" in why, why
     api = next(t for t in listed["result"]["tools"] if t["name"] == "ad_api")
     assert api["inputSchema"]["properties"]["action"]["enum"] == ["search", "modify", "add", "delete", "rename"], api
     user = next(t for t in listed["result"]["tools"] if t["name"] == "ad_user")
@@ -777,6 +804,13 @@ let
         assert w["members"] == ["${userDN 100}"] and w["dc"] == "${dcHost}:636", w
         dns = [m["dn"] for m in call("ad_group", {"action": "members", "id": "vm-team"})["results"]]
         assert ("${userDN 100}" in dns) is present, dns
+
+    # A protected group: adding a plain member to Domain Admins is refused, and it stays out.
+    why = refused("ad_group", {"action": "add_members", "id": "Domain Admins", "members": ["vmuser100"], "reason": "vm-test add to protected group"})
+    print("ad_group add_members Domain Admins", why)
+    assert "protected target" in why, why
+    dns = [m["dn"] for m in call("ad_group", {"action": "members", "id": "Domain Admins"})["results"]]
+    assert "${userDN 100}" not in dns, dns
 
     # ad-objects: create, edit, rename and move a user; an off-allowlist raw edit is refused.
     w = call("ad_user", {"action": "create", "parent": "CN=Users,${base}", "name": "vm-new", "upn": "vm-new@corp.example.com",

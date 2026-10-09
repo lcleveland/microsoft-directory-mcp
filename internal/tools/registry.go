@@ -164,21 +164,9 @@ func addActionTool[In interface{ action() string }, Out any](s *mcp.Server, d De
 				d.refused(t.Name, in.action(), in, err)
 			}
 		}()
-		if !slices.Contains(visible, in.action()) {
+		if err := d.refuse(t, visible, in.action()); err != nil {
 			var zero Out
-			for _, a := range t.Actions {
-				if a.Name == in.action() && !d.capOn(a) {
-					return nil, zero, fmt.Errorf("%s %s is a write the operator has not enabled: it needs the %s capability (--capabilities)",
-						t.Name, a.Name, strings.Join(a.Capabilities, " or "))
-				}
-			}
-			_, hidden := d.visibility(t)
-			for _, x := range hidden {
-				if x.Action == in.action() {
-					return nil, zero, fmt.Errorf("%s %s is hidden: %s", t.Name, x.Action, x.Reason)
-				}
-			}
-			return nil, zero, fmt.Errorf("action %q is not available on %s (available: %s)", in.action(), t.Name, strings.Join(visible, ", "))
+			return nil, zero, err
 		}
 		return h(ctx, req, in)
 	})
@@ -193,6 +181,27 @@ func (d Deps) refused(tool, action string, in any, err error) {
 	side, _, _ := strings.Cut(tool, "_")
 	d.log().Warn(side+" write", "tool", tool, "action", action, "target", cmp.Or(f.ID, f.DN, f.Path, f.UPN, f.Name),
 		"reason", strings.TrimSpace(f.Reason), "outcome", "refused: "+err.Error())
+}
+
+// refuse says why action is not run on t, or nil when it is visible. The
+// SDK's enum check refuses first; this holds should a call get past it.
+func (d Deps) refuse(t Tool, visible []string, action string) error {
+	if slices.Contains(visible, action) {
+		return nil
+	}
+	for _, a := range t.Actions {
+		if a.Name == action && !d.capOn(a) {
+			return fmt.Errorf("%s %s is a write the operator has not enabled: it needs the %s capability (--capabilities)",
+				t.Name, a.Name, strings.Join(a.Capabilities, " or "))
+		}
+	}
+	_, hidden := d.visibility(t)
+	for _, x := range hidden {
+		if x.Action == action {
+			return fmt.Errorf("%s %s is hidden: %s", t.Name, x.Action, x.Reason)
+		}
+	}
+	return fmt.Errorf("action %q is not available on %s (available: %s)", action, t.Name, strings.Join(visible, ", "))
 }
 
 // Visibility is what the *_status tools report about one side.
