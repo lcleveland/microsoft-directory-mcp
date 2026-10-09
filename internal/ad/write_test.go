@@ -256,3 +256,77 @@ func TestReaches(t *testing.T) {
 		t.Errorf("wrote: %q", f.modifies)
 	}
 }
+
+// The protected groups tokenGroups can't show or that have no fixed RID:
+// the root domain's BUILTIN groups for a principal of another domain,
+// DnsAdmins and --protected-groups, nested; and an unreadable cross-domain
+// membership refuses the write.
+func TestGuard(t *testing.T) {
+	f := newFakeDir()
+	cfg := srvConfig()
+	cfg.ProtectedGroups = []string{`CORP\guarded`}
+	c := f.client(cfg)
+	add := func(dn, s string, attrs map[string][]string) string {
+		attrs["objectSid"] = []string{sid(s)}
+		attrs["sAMAccountName"] = []string{strings.TrimPrefix(strings.Split(dn, ",")[0], "CN=")}
+		f.tree[strings.ToLower(dn)] = attrs
+		return dn
+	}
+	group := func(attrs map[string][]string) map[string][]string {
+		attrs["objectClass"] = []string{"top", "group"}
+		return attrs
+	}
+	user := func(dn, s string, tokens ...string) string {
+		attrs := map[string][]string{"objectClass": {"top", "user"}, "primaryGroupID": {"513"}}
+		for _, t := range tokens {
+			attrs["tokenGroups"] = append(attrs["tokenGroups"], sid(t))
+		}
+		return add(dn, s, attrs)
+	}
+	admins := "CN=Administrators,CN=Builtin," + corpDN
+	helpdesk := "CN=helpdesk,CN=Users," + childDN // a child global group in a root domain-local group in root Administrators
+	direct := user("CN=direct,CN=Users,"+childDN, childSID+"-1401", childSID+"-513")
+	nested := user("CN=nested,CN=Users,"+childDN, childSID+"-1402", childSID+"-513", childSID+"-1400")
+	free := user("CN=free,CN=Users,"+childDN, childSID+"-1403", childSID+"-513")
+	add(helpdesk, childSID+"-1400", group(map[string][]string{}))
+	add(admins, "S-1-5-32-544", group(map[string][]string{"isCriticalSystemObject": {"TRUE"}, "member": {direct, "CN=rootlocal,CN=Users," + corpDN}}))
+	add("CN=rootlocal,CN=Users,"+corpDN, corpSID+"-1400", group(map[string][]string{"member": {helpdesk}, "memberOf": {admins}}))
+	add("CN=DnsAdmins,CN=Users,"+corpDN, corpSID+"-1101", group(map[string][]string{}))
+	dnsAdmin := user("CN=dnsadmin,CN=Users,"+corpDN, corpSID+"-1410", corpSID+"-513", corpSID+"-1101")
+	add("CN=guarded,CN=Users,"+corpDN, corpSID+"-1102", group(map[string][]string{}))
+	add("CN=inner,CN=Users,"+corpDN, corpSID+"-1103", group(map[string][]string{"memberOf": {"CN=guarded,CN=Users," + corpDN}}))
+	guarded := user("CN=guardee,CN=Users,"+corpDN, corpSID+"-1411", corpSID+"-513", corpSID+"-1103", corpSID+"-1102")
+	ctx := context.Background()
+
+	for dn, want := range map[string]string{
+		direct: "protected group of corp.example.com", nested: "through cn=rootlocal", dnsAdmin: "cn=dnsadmins",
+		guarded: "cn=guarded", free: "",
+	} {
+		why, err := c.Protected(ctx, dn)
+		if err != nil || want == "" && why != "" || want != "" && !strings.Contains(why, want) {
+			t.Errorf("%s: %q %v, want %q", dn, why, err, want)
+		}
+		if _, err := c.Modify(ctx, dn, "(objectClass=*)", nil, describe); want != "" && !errors.Is(err, ErrProtected) || want == "" && err != nil {
+			t.Errorf("modify %s: %v", dn, err)
+		}
+	}
+	if len(f.modifies) != 1 {
+		t.Errorf("modifies %q", f.modifies)
+	}
+
+	// No GC, so free's groups can't be found in the root domain: refused, not written.
+	f.dead["dc1.corp.example.com"] = true
+	c = f.client(cfg)
+	if why, err := c.Protected(ctx, free); err == nil || !strings.Contains(err.Error(), "global catalog") {
+		t.Errorf("no GC: %q", why)
+	}
+	if _, err := c.Modify(ctx, free, "(objectClass=*)", nil, describe); err == nil || len(f.modifies) != 1 {
+		t.Errorf("no GC modify: %v %q", err, f.modifies)
+	}
+	// An unresolvable --protected-groups group refuses too.
+	delete(f.dead, "dc1.corp.example.com")
+	cfg.ProtectedGroups = []string{`CORP\gone`}
+	if why, err := f.client(cfg).Protected(ctx, free); err == nil || !strings.Contains(err.Error(), "--protected-groups") {
+		t.Errorf("gone: %q %v", why, err)
+	}
+}

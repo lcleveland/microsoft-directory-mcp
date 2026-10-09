@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -79,6 +80,12 @@ func TestEnvMirrors(t *testing.T) {
 	if c.Entra.LoginURL != "https://login.microsoftonline.us" || c.Entra.GraphURL != "https://graph.microsoft.us" {
 		t.Errorf("usgov: %+v", c.Entra)
 	}
+	c, _, err = Parse(adArgs(t), func(k string) string {
+		return map[string]string{"MSDIR_PROTECTED_GROUPS": `CORP\tier0, S-1-5-21-1-2-3-1100`}[k]
+	})
+	if err != nil || !slices.Equal(c.AD.ProtectedGroups, []string{`CORP\tier0`, "S-1-5-21-1-2-3-1100"}) {
+		t.Errorf("protected groups: %+v %v", c.AD, err)
+	}
 }
 
 func TestCloudAndURLOverrides(t *testing.T) {
@@ -117,6 +124,7 @@ func TestSideValidation(t *testing.T) {
 		{[]string{"--ad-forest", "corp.example.com", "--ad-dc", "dc1", "--ad-bind-password-file", "/x"}, "--ad-bind-user"},
 		{[]string{"--ad-forest", "corp.example.com", "--ad-dc", "dc1", "--ad-bind-user", "u"}, "--ad-bind-password-file"},
 		{append(adArgs(t), "--ad-tls", "none"), "--ad-tls"},
+		{append(adArgs(t), "--protected-groups", "CN=x,DC=corp,DC=example,DC=com"), "not by DN"},
 		{[]string{"--entra-tenant", "t", "--entra-cert-file", "/x"}, "--entra-client-id"},
 		{[]string{"--entra-tenant", "t", "--entra-client-id", "c"}, "--entra-cert-file"},
 		{[]string{"--entra-tenant", "t", "--entra-client-id", "c", "--entra-cert-file", "/nonexistent"}, "reading"},

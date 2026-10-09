@@ -34,6 +34,7 @@ type AD struct {
 	InsecureSkipVerify bool
 	Site               string
 	DCs                []string // static domain controller list; empty means DNS SRV
+	ProtectedGroups    []string // groups whose members, direct or nested, are protected targets
 }
 
 // Entra is the tenant side. It is on when --entra-tenant set.
@@ -102,6 +103,7 @@ func (c *Config) LogValue() slog.Value {
 			slog.Bool("insecure_skip_verify", a.InsecureSkipVerify),
 			slog.String("site", a.Site),
 			slog.Any("dcs", a.DCs),
+			slog.Any("protected_groups", a.ProtectedGroups),
 		))
 	}
 	if e := c.Entra; e != nil {
@@ -126,6 +128,7 @@ func Parse(args []string, getenv func(string) string) (*Config, []string, error)
 		e        Entra
 		pwFile   string
 		dcs      string
+		pgroups  string
 		certFile string
 		login    string
 		graphURL string
@@ -152,6 +155,7 @@ func Parse(args []string, getenv func(string) string) (*Config, []string, error)
 	fs.BoolVar(&a.InsecureSkipVerify, "ad-insecure-skip-verify", false, "do not verify domain controller certificates")
 	str(&a.Site, "ad-site", "", "AD site: discovery uses its site-scoped SRV records")
 	str(&dcs, "ad-dc", "", "comma-separated domain controllers (host or host:port), instead of DNS SRV discovery")
+	str(&pgroups, "protected-groups", "", `comma-separated extra AD groups (DOMAIN\name or SID) whose members, direct or nested, writes never touch`)
 	str(&e.Tenant, "entra-tenant", "", "tenant ID or domain; turns the Entra side on")
 	str(&e.ClientID, "entra-client-id", "", "app registration client ID")
 	str(&certFile, "entra-cert-file", "", "PEM file holding the private key and certificate")
@@ -228,6 +232,15 @@ func Parse(args []string, getenv func(string) string) (*Config, []string, error)
 			if dc = strings.TrimSpace(dc); dc != "" {
 				a.DCs = append(a.DCs, dc)
 			}
+		}
+		for g := range strings.SplitSeq(pgroups, ",") {
+			if g = strings.TrimSpace(g); g == "" {
+				continue
+			}
+			if strings.Contains(g, "=") {
+				return nil, nil, fmt.Errorf(`--protected-groups: name %q as DOMAIN\name or by SID, not by DN`, g)
+			}
+			a.ProtectedGroups = append(a.ProtectedGroups, g)
 		}
 		if a.BindPassword, err = readSecret(pwFile); err != nil {
 			return nil, nil, err
