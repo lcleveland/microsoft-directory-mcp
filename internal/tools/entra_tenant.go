@@ -288,6 +288,7 @@ func init() {
 				"grantedCount is its service principal's. expiring_credentials: every app and SP password or key credential "+
 				"ending within days (default 30) from now, soonest first; it sweeps the whole tenant. Credentials carry "+
 				"keyId, displayName and endDateTime only: never secret material.",
+			nil,
 			entraAction{Action{Name: "search_sps", Perms: appRead}, appSearch(entraSPs, false)},
 			entraAction{Action{Name: "get_sp", Perms: appRead}, appGet(entraSPs)},
 			entraAction{Action{Name: "search_apps", Perms: appRead}, appSearch(entraApps, true)},
@@ -300,6 +301,7 @@ func init() {
 				"displayName, @odata.type) and directoryScopeId (/ is the whole tenant); filter on principalId, "+
 				"roleDefinitionId or directoryScopeId. eligibility: PIM eligibility schedules in the same shape, with "+
 				"memberType, status and scheduleInfo (needs P2).",
+			nil,
 			entraAction{Action{Name: "definitions", Perms: roleRead}, entraSearch(entraRoleDefs)},
 			entraAction{Action{Name: "assignments", Perms: roleRead}, roleList("/v1.0/roleManagement/directory/roleAssignments")},
 			entraAction{Action{Name: "eligibility", Perms: []string{"RoleEligibilitySchedule.Read.Directory", "RoleManagement.Read.Directory", "RoleManagement.Read.All"}, Licence: "P2"},
@@ -308,6 +310,7 @@ func init() {
 		entraTool("entra_license", "devices", "Entra ID licence SKUs",
 			"skus: the tenant's subscribed SKUs (skuId, skuPartNumber, capabilityStatus, consumedUnits, prepaidUnits "+
 				"with enabled, suspended and warning units, appliesTo). A user's licences are on entra_user licenses.",
+			nil,
 			entraAction{Action{Name: "skus", Perms: licenceRead}, entraSearch(entraSkus)},
 		),
 		entraTool("entra_org", "infra", "Entra ID tenant",
@@ -316,6 +319,7 @@ func init() {
 				"operator-declared (--entra-password-writeback): Graph has no reliable writeback flag. audit_hint is the "+
 				"newest Enable/Disable password writeback directory audit event (needs AuditLog.Read.All), or unknown "+
 				"when there is none in the log's retention (7 days on Free, 30 on P1/P2).",
+			nil,
 			entraAction{Action{Name: "info", Perms: orgRead}, Deps.orgInfo},
 		),
 	)

@@ -95,6 +95,7 @@ type entraIn struct {
 	Transitive bool `json:"transitive,omitempty" jsonschema:"entra_group members: every nested member, not only direct ones"`
 	// Only on entra_app.
 	Days int `json:"days,omitempty" jsonschema:"entra_app expiring_credentials: the window in days from now (default 30)"`
+	writeIn
 }
 
 func (in entraIn) params(def []string) graph.Params {
@@ -279,13 +280,19 @@ type entraAction struct {
 	run func(Deps, context.Context, entraIn) (map[string]any, error)
 }
 
-func entraTool(name, group, title, desc string, actions ...entraAction) Tool {
+// entraTool is a tool of actions; doc, if set, describes its writes that
+// show, or is "" when none does.
+func entraTool(name, group, title, desc string, doc func(visible []string) string, actions ...entraAction) Tool {
 	t := Tool{Name: name, Group: group}
 	for _, a := range actions {
 		t.Actions = append(t.Actions, a.Action)
 	}
 	t.add = func(s *mcp.Server, d Deps, t Tool, visible []string) {
-		addActionTool(s, d, t, &mcp.Tool{Name: name, Title: title, Description: desc + "\n\n" + entraListDoc, Annotations: readOnly}, visible,
+		full := desc
+		if doc != nil {
+			full += doc(visible)
+		}
+		addActionTool(s, d, t, &mcp.Tool{Name: name, Title: title, Description: full + "\n\n" + entraListDoc, Annotations: readOnly}, visible,
 			func(ctx context.Context, _ *mcp.CallToolRequest, in entraIn) (*mcp.CallToolResult, map[string]any, error) {
 				i := slices.IndexFunc(actions, func(a entraAction) bool { return a.Name == in.Action })
 				out, err := actions[i].run(d, ctx, in)
@@ -316,11 +323,14 @@ func related(k entraKind, rel string, def []string) func(Deps, context.Context, 
 
 type entraAPIIn struct {
 	ActionParam
-	Path   string   `json:"path" jsonschema:"get: a Graph path starting /v1.0/ or /beta/, with its own query string if needed, e.g. /v1.0/users/{id}/memberOf"`
+	Path   string   `json:"path" jsonschema:"a Graph path starting /v1.0/ or /beta/ (writes: /v1.0/ only, no query string); get may carry its own query string, e.g. /v1.0/users/{id}/memberOf"`
 	Filter string   `json:"filter,omitempty" jsonschema:"get: OData $filter; read the entra://guide/odata-filter resource first"`
 	Sort   string   `json:"sort,omitempty" jsonschema:"get: OData $orderby"`
 	Fields []string `json:"fields,omitempty" jsonschema:"get: $select"`
 	Cursor string   `json:"cursor,omitempty" jsonschema:"next_cursor from the previous call with the same arguments, unchanged"`
+	// Not writeIn: its confirm would show for delete, and no raw write takes one.
+	Reason string         `json:"reason,omitempty" jsonschema:"writes: why you are making this change; required, and recorded in the audit log"`
+	Body   map[string]any `json:"body,omitempty" jsonschema:"writes, post, patch, put: the JSON request body"`
 }
 
 const betaWarning = "beta: Microsoft does not support beta APIs in production and may change them without notice"
@@ -365,7 +375,7 @@ func init() {
 				"is a direct member of. devices: the devices the user owns or registered, each with relation. licenses: "+
 				"assignedLicenses and licenseAssignmentStates (direct or group-inherited, errors), with skuPartNumber. "+
 				"auth_methods: the user's registered authentication methods. registration: the user's MFA and SSPR "+
-				"registration details (P1)."+counterpartDoc,
+				"registration details (P1)."+counterpartDoc, entraAccountStateDoc,
 			entraAction{Action{Name: "search", Perms: userRead}, entraSearch(entraUsers)},
 			entraAction{Action{Name: "get", Perms: userRead}, Deps.userGet},
 			entraAction{Action{Name: "member_of", Perms: groupRead}, related(entraUsers, "/memberOf", directoryObjects)},
@@ -379,13 +389,14 @@ func init() {
 			}},
 			entraAction{Action{Name: "auth_methods", Perms: []string{"UserAuthenticationMethod.Read.All"}}, related(entraUsers, "/authentication/methods", nil)},
 			entraAction{Action{Name: "registration", Perms: []string{"AuditLog.Read.All"}, Licence: "P1"}, Deps.registration},
+			entraAccountState("disable"), entraAccountState("enable"), entraAccountState("revoke_sessions"),
 		),
 		entraTool("entra_group", "identity", "Entra ID groups",
 			"Groups of the tenant. search: list groups as briefs (id, displayName, mail, securityEnabled, mailEnabled, "+
 				"groupTypes, onPremisesSyncEnabled). get: one group by object id, with description, membershipRule, "+
 				"isAssignableToRole, memberCount and ownerCount, but not its members. members: the group's members as "+
 				"briefs of their own kind (@odata.type says which); transitive=true lists every nested member instead. "+
-				"owners: the group's owners."+counterpartDoc,
+				"owners: the group's owners."+counterpartDoc, nil,
 			entraAction{Action{Name: "search", Perms: groupRead}, entraSearch(entraGroups)},
 			entraAction{Action{Name: "get", Perms: groupRead}, Deps.groupGet},
 			entraAction{Action{Name: "members", Perms: groupRead}, func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
@@ -404,7 +415,7 @@ func init() {
 				"registered owners. managed_search: Intune managed devices as briefs (id, deviceName, operatingSystem, "+
 				"osVersion, complianceState, lastSyncDateTime, userPrincipalName); filter, not query. managed_get: one "+
 				"Intune managed device by its Intune id, every property (encryption, ownership, serial number and more). "+
-				"Intune is read only here."+counterpartDoc,
+				"Intune is read only here."+counterpartDoc, nil,
 			entraAction{Action{Name: "search", Perms: deviceRead}, entraSearch(entraDevices)},
 			entraAction{Action{Name: "get", Perms: deviceRead}, func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
 				return d.entraGetJoined(ctx, joinDevice, in)
@@ -413,14 +424,22 @@ func init() {
 			entraAction{Action{Name: "managed_search", Perms: intuneRead, Licence: "Intune"}, entraSearch(entraManaged)},
 			entraAction{Action{Name: "managed_get", Perms: intuneRead, Licence: "Intune"}, entraGet(entraManaged)},
 		),
-		Tool{Name: "entra_api", Group: "core", Actions: []Action{{Name: "get"}},
+		Tool{Name: "entra_api", Group: "core", Actions: []Action{{Name: "get"}, {Name: "post", Capabilities: entraCapabilities()},
+			{Name: "patch", Capabilities: entraCapabilities()}, {Name: "put", Capabilities: entraCapabilities()}, {Name: "delete", Capabilities: entraCapabilities()}},
 			add: func(s *mcp.Server, d Deps, t Tool, visible []string) {
-				addActionTool(s, d, t, &mcp.Tool{Name: t.Name, Title: "Raw Microsoft Graph read", Annotations: readOnly,
-					Description: "Raw Graph GET when no entra_* tool fits. get: any path under /v1.0/ or /beta/, as " +
-						"Graph returns it; a collection pages like the entra_* lists (200 at a time, next_cursor). " +
-						"Beta replies carry _unstable: beta is unsupported in production and changes without notice. " +
-						"Read the entra://guide/odata-filter resource before writing a filter."},
+				desc := "Raw Graph GET when no entra_* tool fits. get: any path under /v1.0/ or /beta/, as " +
+					"Graph returns it; a collection pages like the entra_* lists (200 at a time, next_cursor). " +
+					"Beta replies carry _unstable: beta is unsupported in production and changes without notice. " +
+					"Read the entra://guide/odata-filter resource before writing a filter."
+				if len(visible) > 1 {
+					desc += entraAPIWriteDoc
+				}
+				addActionTool(s, d, t, &mcp.Tool{Name: t.Name, Title: "Raw Microsoft Graph read", Annotations: readOnly, Description: desc},
 					visible, func(ctx context.Context, _ *mcp.CallToolRequest, in entraAPIIn) (*mcp.CallToolResult, map[string]any, error) {
+						if in.Action != "get" {
+							out, err := d.apiWrite(ctx, in)
+							return nil, out, err
+						}
 						out, err := d.apiGet(ctx, in)
 						return nil, out, err
 					})

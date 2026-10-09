@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"io"
@@ -34,15 +35,17 @@ func graphStub(t *testing.T, reply func(r *http.Request) string) (*graph.Client,
 		seen = append(seen, r)
 		mu.Unlock()
 		body := reply(r)
-		// "403" answers Authorization_RequestDenied, "403 Code" that code;
-		// another status alone answers that status.
-		if st, code, _ := strings.Cut(body, " "); len(st) == 3 && st[0] >= '4' && st[0] <= '5' {
+		// "403" answers Authorization_RequestDenied, "403 Code" that code,
+		// "403 Code message" that message too; another status alone answers
+		// that status.
+		if st, rest, _ := strings.Cut(body, " "); len(st) == 3 && st[0] >= '4' && st[0] <= '5' {
+			code, msg, _ := strings.Cut(rest, " ")
 			if code == "" {
 				code = map[string]string{"403": "Authorization_RequestDenied"}[st]
 			}
 			n, _ := strconv.Atoi(st)
 			w.WriteHeader(n)
-			body = `{"error":{"code":"` + code + `","message":"no"}}`
+			body = `{"error":{"code":"` + code + `","message":"` + cmp.Or(msg, "no") + `"}}`
 		}
 		io.WriteString(w, body)
 	}))
@@ -58,12 +61,16 @@ func graphStub(t *testing.T, reply func(r *http.Request) string) (*graph.Client,
 	return g, func() []*http.Request { mu.Lock(); defer mu.Unlock(); return slices.Clone(seen) }
 }
 
-// entraSession registers the real Entra roster under probe against a Graph
-// stub answering every call with reply, and returns the requests it saw.
-func entraSession(t *testing.T, probe *graph.Probe, reply func(r *http.Request) string) (*mcp.ClientSession, func() []*http.Request) {
+// entraSession registers the real Entra roster under probe, with caps
+// enabled, against a Graph stub answering every call with reply, and
+// returns the requests it saw.
+func entraSession(t *testing.T, probe *graph.Probe, reply func(r *http.Request) string, caps ...string) (*mcp.ClientSession, func() []*http.Request) {
 	t.Helper()
 	g, seen := graphStub(t, reply)
-	cfg := &config.Config{ToolGroups: map[string]bool{}, Entra: &config.Entra{Cloud: "global"}}
+	cfg := &config.Config{ToolGroups: map[string]bool{}, Entra: &config.Entra{Cloud: "global"}, Capabilities: map[string]bool{}}
+	for _, c := range caps {
+		cfg.Capabilities[c] = true
+	}
 	for _, grp := range config.Groups {
 		cfg.ToolGroups[grp] = true
 	}

@@ -13,6 +13,8 @@
 #                            directory audit events (activityDisplayName filters);
 #                            a synced user whose SID is vmuser042's, read from
 #                            /var/lib/samba-dc/vm-synced-sid (onPremisesSyncBehavior refused: 403)
+#                            PATCH of a user's accountEnabled, empty role assignments,
+#                            memberships and ownerships; every write recorded in /tmp/stub-writes
 #   microsoft-directory-mcp  the module's HTTP service
 #
 # One full MCP session calls ad_status (a simple bind over LDAPS, trusting
@@ -42,8 +44,8 @@ let
   # vmuser042's objectSid, written at provisioning for the stub's synced user.
   syncedSid = "/var/lib/samba-dc/vm-synced-sid";
   # An unsigned JWT the server decodes for the startup probe. Payload:
-  # {"aud":"https://graph.microsoft.com","roles":["Organization.Read.All","User.Read.All","LicenseAssignment.Read.All","GroupMember.Read.All","Device.Read.All","Application.Read.All","AuditLog.Read.All"]}
-  accessToken = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJhdWQiOiJodHRwczovL2dyYXBoLm1pY3Jvc29mdC5jb20iLCJyb2xlcyI6WyJPcmdhbml6YXRpb24uUmVhZC5BbGwiLCJVc2VyLlJlYWQuQWxsIiwiTGljZW5zZUFzc2lnbm1lbnQuUmVhZC5BbGwiLCJHcm91cE1lbWJlci5SZWFkLkFsbCIsIkRldmljZS5SZWFkLkFsbCIsIkFwcGxpY2F0aW9uLlJlYWQuQWxsIiwiQXVkaXRMb2cuUmVhZC5BbGwiXX0.stub";
+  # {"aud":"https://graph.microsoft.com","roles":["Organization.Read.All","User.Read.All","LicenseAssignment.Read.All","GroupMember.Read.All","Device.Read.All","Application.Read.All","AuditLog.Read.All","User.EnableDisableAccount.All","User.RevokeSessions.All","RoleManagement.Read.Directory"]}
+  accessToken = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJhdWQiOiJodHRwczovL2dyYXBoLm1pY3Jvc29mdC5jb20iLCJyb2xlcyI6WyJPcmdhbml6YXRpb24uUmVhZC5BbGwiLCJVc2VyLlJlYWQuQWxsIiwiTGljZW5zZUFzc2lnbm1lbnQuUmVhZC5BbGwiLCJHcm91cE1lbWJlci5SZWFkLkFsbCIsIkRldmljZS5SZWFkLkFsbCIsIkFwcGxpY2F0aW9uLlJlYWQuQWxsIiwiQXVkaXRMb2cuUmVhZC5BbGwiLCJVc2VyLkVuYWJsZURpc2FibGVBY2NvdW50LkFsbCIsIlVzZXIuUmV2b2tlU2Vzc2lvbnMuQWxsIiwiUm9sZU1hbmFnZW1lbnQuUmVhZC5EaXJlY3RvcnkiXX0.stub";
 
   # Seed data, ldbadd-ed into sam.ldb at provisioning: 250 users (more than
   # one page), vm-team with five users and the nested vm-sub (two more);
@@ -308,6 +310,21 @@ let
         h.reply(200, {"value": [e for e in SEED["directoryAudits"] if not f or "'" + e["activityDisplayName"] + "'" in f]})
 
 
+    def user_patch(h, query, key):
+        """Sets accountEnabled on a seeded user; the synced user is never written."""
+        body = json.loads(h.body())
+        for u in SEED["users"]:
+            if urllib.parse.unquote(key) in (u["id"], u["userPrincipalName"]):
+                u.update({k: v for k, v in body.items() if k == "accountEnabled"})
+                h.send_response(204)
+                return h.end_headers()
+        h.error(404, "Request_ResourceNotFound", key)
+
+
+    def none(h, query, key):
+        h.reply(200, {"value": []})
+
+
     def no_grant(h, query, key):
         h.error(403, "Authorization_RequestDenied", "Insufficient privileges to complete the operation.")
 
@@ -330,10 +347,14 @@ let
         ("GET", "/v1.0/applications"): listing("applications"),
         ("GET", "/v1.0/servicePrincipals"): listing("servicePrincipals"),
         ("GET", "/beta/organization"): organization,
+        # No role holders: nothing is protected.
+        ("GET", "/v1.0/roleManagement/directory/roleAssignments"): lambda h, query: none(h, query, None),
     }
     # (method, path pattern) -> handler(h, query, the pattern's group).
     PATTERNS = [
         ("GET", re.compile(r"/v1\.0/users/([^/]+)"), user),
+        ("PATCH", re.compile(r"/v1\.0/users/([^/]+)"), user_patch),
+        ("GET", re.compile(r"/v1\.0/users/([^/]+)/(?:transitiveMemberOf|ownedObjects)"), none),
         ("GET", re.compile(r"/v1\.0/groups/([^/]+)/members"), group_members),
         ("GET", re.compile(r"/v1\.0/(users|groups)/[^/]+/onPremisesSyncBehavior"), no_grant),
     ]
@@ -362,6 +383,8 @@ let
             url = urllib.parse.urlparse(self.path)
             route = ROUTES.get((self.command, url.path))
             if url.path not in UNAUTHENTICATED:
+                if self.command != "GET":
+                    record("writes", self.command + " " + url.path)
                 bearer = self.headers.get("Authorization", "")
                 record("bearers", bearer)
                 if bearer != "Bearer " + ACCESS_TOKEN:
@@ -438,7 +461,7 @@ let
     _, listed = post({"jsonrpc": "2.0", "id": next(ids), "method": "tools/list"}, session)
     tools = sorted(t["name"] for t in listed["result"]["tools"])
     assert tools == ["ad_api", "ad_computer", "ad_gpo", "ad_group", "ad_object", "ad_ou", "ad_policy", "ad_status", "ad_topology", "ad_user",
-                     "entra_api", "entra_app", "entra_audit", "entra_device", "entra_group", "entra_license", "entra_org", "entra_status", "entra_user"], tools
+                     "entra_api", "entra_app", "entra_audit", "entra_device", "entra_group", "entra_license", "entra_org", "entra_role", "entra_status", "entra_user"], tools
 
     ad = call("ad_status", {})
     print("ad_status", json.dumps(ad))
@@ -458,7 +481,7 @@ let
     # The startup probe: the roles claim decoded, P1 absent from subscribedSkus,
     # Intune present from its read probe. Later issues assert their hidden actions.
     probe = entra["probe"]
-    assert probe["roles"] == ["Organization.Read.All", "User.Read.All", "LicenseAssignment.Read.All", "GroupMember.Read.All", "Device.Read.All", "Application.Read.All", "AuditLog.Read.All"], probe
+    assert probe["roles"] == ["Organization.Read.All", "User.Read.All", "LicenseAssignment.Read.All", "GroupMember.Read.All", "Device.Read.All", "Application.Read.All", "AuditLog.Read.All", "User.EnableDisableAccount.All", "User.RevokeSessions.All", "RoleManagement.Read.Directory"], probe
     assert probe["licences"] == {"P1": "absent", "P2": "absent", "Intune": "present"}, probe
     assert "group_reads" not in probe and "notes" not in probe, probe
     assert entra["enabled_groups"] == ["core", "identity", "security", "policy", "devices", "infra"], entra
@@ -466,8 +489,7 @@ let
     hidden = {h["tool"] + " " + h["action"]: h["reason"] for h in entra["hidden_actions"]}
     assert sorted(hidden) == ["entra_device managed_get", "entra_device managed_search",
                               "entra_policy auth_methods_policy", "entra_policy conditional_access", "entra_policy named_locations", "entra_policy security_defaults",
-                              "entra_risk risk_detections", "entra_risk risky_users", "entra_role assignments", "entra_role definitions",
-                              "entra_role eligibility", "entra_signin search", "entra_user auth_methods", "entra_user registration"], sorted(hidden)
+                              "entra_risk risk_detections", "entra_risk risky_users", "entra_role eligibility", "entra_signin search", "entra_user auth_methods", "entra_user registration"], sorted(hidden)
     # AuditLog.Read.All is granted: sign-ins are hidden for the licence alone.
     assert hidden["entra_signin search"] == "licence: needs P1", hidden
     assert ad["probe"]["bound"], ad
@@ -622,8 +644,9 @@ let
     added = call("entra_audit", {"action": "search", "filter": "activityDisplayName eq 'Add user'"})["results"]
     assert [a["initiatedBy"]["user"]["userPrincipalName"] for a in added] == ["admin@example.com"], added
 
-    # Writes: the server runs with --capabilities ad-account-state only.
+    # Writes: the server runs with --capabilities ad-account-state,entra-account-state.
     assert ad["enabled_capabilities"] == ["ad-account-state"], ad
+    assert entra["enabled_capabilities"] == ["entra-account-state"], entra
     api = next(t for t in listed["result"]["tools"] if t["name"] == "ad_api")
     assert api["inputSchema"]["properties"]["action"]["enum"] == ["search", "modify"], api
     user = next(t for t in listed["result"]["tools"] if t["name"] == "ad_user")
@@ -647,6 +670,15 @@ let
         assert w["dc"] == "${dcHost}:636" and not w.get("fallback"), w
         assert w["sync"].startswith("the change reaches its Entra counterpart " + synced["id"]), w
         assert call("ad_user", {"action": "get", "id": "vmuser042", "fields": ["enabled"]})["enabled"] is enabled
+
+    # entra-account-state: the synced user's disable is refused and routed to AD; a cloud user's goes through.
+    why = refused("entra_user", {"action": "disable", "id": synced["id"], "reason": "vm-test entra synced"})
+    print("entra_user disable synced", why)
+    assert "call ad_user disable or enable on " + by_upn["dn"] in why, why
+    w = call("entra_user", {"action": "disable", "id": "entra-user3@example.com", "reason": "vm-test entra disable"})
+    print("entra_user disable", json.dumps(w))
+    assert w["id"] == "00000000-0000-0000-0000-000000000103" and w["endpoint"] == "PATCH /v1.0/users/entra-user3@example.com", w
+    assert call("entra_user", {"action": "get", "id": w["id"]})["accountEnabled"] is False
     print("ok")
   '';
 
@@ -794,7 +826,7 @@ pkgs.testers.runNixOSTest {
         logLevel = "debug";
         extraArgs = [
           "--capabilities"
-          "ad-account-state"
+          "ad-account-state,entra-account-state"
         ];
         http.authTokenFile = "/run/mcp-bearer";
         ad = {
@@ -855,5 +887,11 @@ pkgs.testers.runNixOSTest {
             assert any(line in x and "outcome=ok" in x and "dc=${dcHost}:636" in x and "capability=ad-account-state" in x
                        for x in journal.splitlines()), line
         assert any('reason="vm-test protected"' in x and 'outcome="not sent"' in x for x in journal.splitlines()), journal
+        assert any('reason="vm-test entra disable"' in x and "outcome=ok" in x and "capability=entra-account-state" in x
+                   for x in journal.splitlines()), journal
+
+    with subtest("the stub recorded the cloud user's disable and no write to the synced user"):
+        writes = machine.succeed("cat /tmp/stub-writes").splitlines()
+        assert writes == ["PATCH /v1.0/users/entra-user3@example.com"], writes
   '';
 }

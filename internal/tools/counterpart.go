@@ -88,7 +88,11 @@ func (d Deps) fromEntra(ctx context.Context, j join, obj map[string]any) (*Count
 		return &Counterpart{SourceOfAuthority: "tenant", Source: "cloud-only: no onPremisesSecurityIdentifier"}, nil
 	}
 	c := &Counterpart{}
-	e, err := adBySID(ctx, d, sid, j.ad.class)
+	var e *ldap.Entry
+	err := ad.ErrNoMatch // without the AD side, Entra alone says
+	if d.AD != nil {
+		e, err = adBySID(ctx, d, sid, j.ad.class)
+	}
 	switch {
 	case errors.Is(err, ad.ErrNoMatch):
 	case err != nil:

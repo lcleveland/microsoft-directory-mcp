@@ -112,6 +112,7 @@ func init() {
 			"search: directory audit events, newest first, as briefs (activityDateTime, activityDisplayName, category, "+
 				"result, initiatedBy, targetResources with displayName). Filter on activityDateTime, activityDisplayName, "+
 				"category, result, initiatedBy/user/userPrincipalName or targetResources/any(t: t/id eq '…')."+logDoc,
+			nil,
 			entraAction{Action{Name: "search", Perms: auditRead}, entraAudits.search},
 		),
 		entraTool("entra_signin", "security", "Entra ID sign-in log",
@@ -121,6 +122,7 @@ func init() {
 				"ipAddress or status/errorCode. Non-interactive, service-principal and managed-identity sign-ins are beta "+
 				"only: entra_api get /beta/auditLogs/signIns with a filter such as signInEventTypes/any(t: t eq "+
 				"'nonInteractiveUser') (or 'servicePrincipal', 'managedIdentity') and createdDateTime."+logDoc,
+			nil,
 			entraAction{Action{Name: "search", Perms: auditRead, Licence: "P1"}, entraSignIns.search},
 		),
 		entraTool("entra_risk", "security", "Entra ID Identity Protection",
@@ -129,6 +131,7 @@ func init() {
 				"events as briefs (id, detectedDateTime, riskEventType, riskLevel, riskState, userPrincipalName, ipAddress, "+
 				"location); filter on userId, riskEventType or detectedDateTime. Graph allows Identity Protection about 1 "+
 				"request per second per tenant, shared by every app; keep filters narrow.",
+			nil,
 			entraAction{Action{Name: "risky_users", Perms: []string{"IdentityRiskyUser.Read.All", "IdentityRiskyUser.ReadWrite.All"}, Licence: "P2"}, entraRiskyUsers.search},
 			entraAction{Action{Name: "risk_detections", Perms: []string{"IdentityRiskEvent.Read.All"}, Licence: "P2"}, entraRiskDetections.search},
 		),
@@ -138,6 +141,7 @@ func init() {
 				"named_locations: the named locations (IP ranges, countries). auth_methods_policy: the authentication "+
 				"methods policy and each method's configuration. security_defaults: whether security defaults are on. "+
 				"Graph allows Conditional Access about 1 request per second per tenant, shared by every app; read one policy rather than many.",
+			nil,
 			entraAction{Action{Name: "conditional_access", Perms: caRead}, func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
 				if in.ID != "" {
 					return entraGet(entraCAPolicies)(d, ctx, in)
