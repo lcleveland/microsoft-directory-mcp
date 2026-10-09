@@ -3,6 +3,7 @@ package tools
 
 import (
 	"context"
+	_ "embed"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -32,6 +33,8 @@ func Register(s *mcp.Server, d Deps) int {
 	}
 	if d.Graph != nil {
 		registerEntraStatus(s, d)
+		addGuide(s, "entra://guide/odata-filter", "odata-filter", odataFilterGuide,
+			"How to write the filter, query and sort of entra_* lists: OData syntax, advanced queries, and filters for common questions.")
 		n++
 	}
 	for _, t := range roster {
@@ -42,6 +45,9 @@ func Register(s *mcp.Server, d Deps) int {
 	}
 	return n
 }
+
+//go:embed odata-filter.md
+var odataFilterGuide string
 
 var readOnly = &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true, OpenWorldHint: new(true)}
 

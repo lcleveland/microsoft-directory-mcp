@@ -3,6 +3,7 @@
 package graph
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/rand"
@@ -17,6 +18,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -44,6 +46,9 @@ type Client struct {
 	graphURL string
 	hc       *http.Client
 	now      func() time.Time
+	sleep    func(context.Context, time.Duration) error
+	// cursorKey signs list cursors; random per process.
+	cursorKey []byte
 
 	mu    sync.Mutex
 	token string
@@ -56,11 +61,13 @@ func New(tenant, clientID string, pemBytes []byte, loginURL, graphURL string, hc
 	c := &Client{
 		clientID: clientID,
 		tokenURL: loginURL + "/" + url.PathEscape(tenant) + "/oauth2/v2.0/token",
-		graphURL: graphURL, hc: hc, now: time.Now,
+		graphURL: graphURL, hc: hc, now: time.Now, sleep: sleep,
 	}
 	if c.hc == nil {
 		c.hc = http.DefaultClient
 	}
+	c.cursorKey = make([]byte, 32)
+	rand.Read(c.cursorKey)
 	for rest := pemBytes; ; {
 		var b *pem.Block
 		if b, rest = pem.Decode(rest); b == nil {
@@ -168,48 +175,129 @@ func (c *Client) bearer(ctx context.Context, force bool) (string, time.Time, err
 
 // APIError is a non-2xx Graph reply.
 type APIError struct {
-	Status  int
-	Code    string
-	Message string
+	Status    int
+	Code      string
+	Message   string
+	RequestID string
 }
 
 func (e *APIError) Error() string {
-	return fmt.Sprintf("graph: HTTP %d %s: %s", e.Status, e.Code, e.Message)
+	s := fmt.Sprintf("graph: HTTP %d %s: %s", e.Status, e.Code, e.Message)
+	if e.RequestID != "" {
+		s += " (request-id " + e.RequestID + ")"
+	}
+	return s
+}
+
+func apiError(status int, body []byte) *APIError {
+	var env struct {
+		Error struct {
+			Code, Message string
+			InnerError    struct {
+				RequestID string `json:"request-id"`
+			} `json:"innerError"`
+		} `json:"error"`
+	}
+	json.Unmarshal(body, &env)
+	return &APIError{status, env.Error.Code, env.Error.Message, env.Error.InnerError.RequestID}
 }
 
 // Get fetches path (e.g. "/v1.0/organization") and decodes the JSON reply
-// into out. A 401 fetches a fresh token and retries once.
+// into out.
 func (c *Client) Get(ctx context.Context, path string, out any) error {
-	for attempt := 0; ; attempt++ {
-		tok, _, err := c.bearer(ctx, attempt > 0)
-		if err != nil {
+	return c.Do(ctx, http.MethodGet, path, nil, out)
+}
+
+// Do sends method to path with body JSON-encoded (nil for none) and decodes
+// the reply into out (nil discards it).
+func (c *Client) Do(ctx context.Context, method, path string, body, out any) error {
+	var b []byte
+	if body != nil {
+		var err error
+		if b, err = json.Marshal(body); err != nil {
 			return err
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.graphURL+path, nil)
+	}
+	resp, err := c.send(ctx, method, c.graphURL+path, false, b)
+	if err != nil || out == nil || len(resp) == 0 {
+		return err
+	}
+	return json.Unmarshal(resp, out)
+}
+
+const (
+	maxRetries = 3
+	maxWait    = time.Minute
+)
+
+// send makes one request. A 401 fetches a fresh token and retries once. A
+// GET answered 429 or 503 waits out Retry-After and retries, unless the wait
+// is over maxWait or would outlast ctx's deadline; other methods are never
+// retried.
+func (c *Client) send(ctx context.Context, method, u string, eventual bool, body []byte) ([]byte, error) {
+	force := false
+	for retries := 0; ; {
+		tok, _, err := c.bearer(ctx, force)
 		if err != nil {
-			return err
+			return nil, err
+		}
+		req, err := http.NewRequestWithContext(ctx, method, u, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
 		}
 		req.Header.Set("Authorization", "Bearer "+tok)
 		req.Header.Set("Accept", "application/json")
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		if eventual {
+			req.Header.Set("ConsistencyLevel", "eventual")
+		}
 		resp, err := c.hc.Do(req)
 		if err != nil {
-			return fmt.Errorf("graph: %w", err)
+			return nil, fmt.Errorf("graph: %w", err)
 		}
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+		b, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 		resp.Body.Close()
 		if err != nil {
-			return fmt.Errorf("graph: %w", err)
+			return nil, fmt.Errorf("graph: %w", err)
 		}
-		if resp.StatusCode == http.StatusUnauthorized && attempt == 0 {
+		switch st := resp.StatusCode; {
+		case st/100 == 2:
+			return b, nil
+		case st == http.StatusUnauthorized && !force:
+			force = true
 			continue
-		}
-		if resp.StatusCode/100 != 2 {
-			var env struct {
-				Error struct{ Code, Message string } `json:"error"`
+		case method == http.MethodGet && (st == http.StatusTooManyRequests || st == http.StatusServiceUnavailable) && retries < maxRetries:
+			wait := retryAfter(resp.Header, retries)
+			if dl, ok := ctx.Deadline(); wait <= maxWait && (!ok || time.Until(dl) > wait) {
+				retries++
+				if err := c.sleep(ctx, wait); err != nil {
+					return nil, err
+				}
+				continue
 			}
-			json.Unmarshal(body, &env)
-			return &APIError{resp.StatusCode, env.Error.Code, env.Error.Message}
 		}
-		return json.Unmarshal(body, out)
+		return nil, apiError(resp.StatusCode, b)
+	}
+}
+
+// retryAfter reads Retry-After in seconds, else backs off exponentially.
+func retryAfter(h http.Header, retries int) time.Duration {
+	secs, err := strconv.Atoi(h.Get("Retry-After"))
+	if err != nil || secs < 0 {
+		return time.Second << retries
+	}
+	return time.Duration(secs) * time.Second
+}
+
+func sleep(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
 	}
 }

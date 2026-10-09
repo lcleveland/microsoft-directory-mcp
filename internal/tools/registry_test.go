@@ -155,6 +155,15 @@ func TestNoProbeShowsEverything(t *testing.T) {
 	}
 }
 
+// With the Entra side on, the OData filter guide is served.
+func TestEntraGuideServed(t *testing.T) {
+	cs := session(t, &config.Config{NoProbe: true}, Deps{})
+	res, err := cs.ReadResource(context.Background(), &mcp.ReadResourceParams{URI: "entra://guide/odata-filter"})
+	if err != nil || len(res.Contents) != 1 || !strings.Contains(res.Contents[0].Text, "ConsistencyLevel") {
+		t.Errorf("guide: %v %v", res, err)
+	}
+}
+
 func TestGroupFilterHidesTools(t *testing.T) {
 	cs := session(t, &config.Config{ToolGroups: map[string]bool{"core": true, "identity": true}}, Deps{})
 	got := listed(t, cs)

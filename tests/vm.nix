@@ -6,7 +6,8 @@
 #   stub-graph               stdlib Python Graph: v2.0 token endpoint that
 #                            verifies the client assertion and issues a JWT
 #                            with a roles claim; /organization, and the probe's
-#                            subscribedSkus (no P1), managedDevices and signIns (403)
+#                            subscribedSkus (no P1), managedDevices and signIns (403);
+#                            /users in two nextLink pages, the second 429 once
 #   microsoft-directory-mcp  the module's HTTP service
 #
 # One full MCP session calls ad_status (a simple bind over LDAPS, trusting
@@ -130,7 +131,12 @@ let
             }],
         }],
         "managedDevices": [],
+        # Two pages of two and one, the second answered 429 once.
+        "users": [{"id": "00000000-0000-0000-0000-00000000010%d" % n,
+                   "displayName": "Entra User %d" % n,
+                   "userPrincipalName": "entra-user%d@example.com" % n} for n in (1, 2, 3)],
     }
+    THROTTLED = set()
 
 
     def record(name, value):
@@ -198,6 +204,17 @@ let
         return lambda h, query: h.reply(200, {"value": SEED[name]})
 
 
+    def users(h, query):
+        if query.get("$skiptoken") != ["p2"]:
+            return h.reply(200, {"value": SEED["users"][:2],
+                                 "@odata.nextLink": "http://127.0.0.1:%d/v1.0/users?$skiptoken=p2" % PORT})
+        if "users-p2" not in THROTTLED:
+            THROTTLED.add("users-p2")
+            record("throttled", h.path)
+            return h.reply(429, {"error": {"code": "TooManyRequests", "message": "throttled"}}, {"Retry-After": "1"})
+        h.reply(200, {"value": SEED["users"][2:]})
+
+
     def no_premium(h, query):
         h.error(403, "Authentication_RequestFromNonPremiumTenantOrB2CTenant",
                 "Neither tenant is B2C or tenant doesn't have premium license")
@@ -209,14 +226,17 @@ let
         ("GET", "/v1.0/subscribedSkus"): listing("subscribedSkus"),
         ("GET", "/v1.0/deviceManagement/managedDevices"): listing("managedDevices"),
         ("GET", "/v1.0/auditLogs/signIns"): no_premium,
+        ("GET", "/v1.0/users"): users,
     }
     UNAUTHENTICATED = {TOKEN_PATH}
 
 
     class Handler(http.server.BaseHTTPRequestHandler):
-        def reply(self, status, payload):
+        def reply(self, status, payload, headers={}):
             body = json.dumps(payload).encode()
             self.send_response(status)
+            for k, v in headers.items():
+                self.send_header(k, v)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()

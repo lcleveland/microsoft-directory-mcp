@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // probeStub answers the token endpoint with token and every Graph path in
@@ -28,7 +29,9 @@ func probeStub(t *testing.T, token string, routes map[string]reply) *Client {
 		io.WriteString(w, rp.body)
 	}))
 	t.Cleanup(ts.Close)
-	return newClient(t, ts.URL, ts.URL)
+	c := newClient(t, ts.URL, ts.URL)
+	c.sleep = func(context.Context, time.Duration) error { return nil }
+	return c
 }
 
 type reply struct {

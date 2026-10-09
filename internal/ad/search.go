@@ -11,15 +11,12 @@ import (
 	"time"
 
 	"github.com/go-ldap/ldap/v3"
+
+	"github.com/lcleveland/microsoft-directory-mcp/internal/paging"
 )
 
-const (
-	// PageSize and PageBytes cap one page of results.
-	PageSize  = 200
-	PageBytes = 60 << 10
-	// cursorIdle is under AD's 900 s MaxConnIdleTime.
-	cursorIdle = 10 * time.Minute
-)
+// cursorIdle is under AD's 900 s MaxConnIdleTime.
+const cursorIdle = 10 * time.Minute
 
 // Query is a paged search, domain by domain. With Base it searches only
 // under that DN, in the domain owning it; otherwise under each domain head
@@ -38,17 +35,10 @@ type Query struct {
 
 // Page is one page of results.
 type Page struct {
-	Results    []map[string]any `json:"results"`
-	NextCursor string           `json:"next_cursor,omitempty"`
-	Truncation *Truncation      `json:"_truncation,omitempty"`
-	Skipped    []Skipped        `json:"_skipped,omitempty"`
-}
-
-// Truncation says a page was cut to fit PageBytes.
-type Truncation struct {
-	Returned int    `json:"returned"`
-	Of       int    `json:"of"`
-	Note     string `json:"note"`
+	Results    []map[string]any   `json:"results"`
+	NextCursor string             `json:"next_cursor,omitempty"`
+	Truncation *paging.Truncation `json:"_truncation,omitempty"`
+	Skipped    []Skipped          `json:"_skipped,omitempty"`
 }
 
 // paged is a search in progress: the connection its paging cookie belongs
@@ -71,11 +61,7 @@ func (p *paged) close() {
 	}
 }
 
-var (
-	errExpired = errors.New("cursor expired, re-run the search")
-	// ErrForeignCursor is a cursor passed with arguments other than those that returned it.
-	ErrForeignCursor = errors.New("cursor does not belong to this query; pass next_cursor only with the same arguments that returned it")
-)
+var errExpired = errors.New("cursor expired, re-run the search")
 
 // Search returns one page of q: a new search when cursor is "", else the
 // next page of the search that returned it. The cursor pins a connection
@@ -99,7 +85,7 @@ func (c *Client) Search(ctx context.Context, q Query, cursor string) (*Page, err
 	page := &Page{Results: []map[string]any{}}
 	out := p.pending
 	p.pending = nil
-	for len(out) < PageSize && p.idx < len(p.domains) {
+	for len(out) < paging.Size && p.idx < len(p.domains) {
 		d := p.domains[p.idx]
 		if p.conn == nil {
 			if p.conn, _, err = c.Open(ctx, d); err != nil {
@@ -108,7 +94,7 @@ func (c *Client) Search(ctx context.Context, q Query, cursor string) (*Page, err
 				continue
 			}
 		}
-		res, err := p.conn.Search(p.request(d, PageSize-len(out)))
+		res, err := p.conn.Search(p.request(d, paging.Size-len(out)))
 		if err != nil {
 			p.close()
 			switch {
@@ -137,7 +123,7 @@ func (c *Client) Search(ctx context.Context, q Query, cursor string) (*Page, err
 		}
 	}
 	var kept int
-	kept, page.Truncation = Trim(out)
+	kept, page.Truncation = paging.Trim(out)
 	p.pending = out[kept:]
 	page.Results = append(page.Results, out[:kept]...)
 	if p.idx < len(p.domains) || len(p.pending) > 0 {
@@ -200,7 +186,7 @@ func (c *Client) take(cursor, key string) (*paged, error) {
 	case !ok:
 		return nil, errExpired
 	case p.key != key:
-		return nil, ErrForeignCursor
+		return nil, paging.ErrForeignCursor
 	case p.conn != nil && p.conn.IsClosing():
 		p.close()
 		delete(c.cursors, cursor)
@@ -220,24 +206,4 @@ func (c *Client) keep(p *paged) string {
 	p.used = c.now()
 	c.cursors[id] = p
 	return id
-}
-
-// Trim returns how many leading results fit in PageBytes (at least one),
-// and the _truncation note when that is fewer than all.
-func Trim(rs []map[string]any) (int, *Truncation) {
-	if kept := fit(rs); kept < len(rs) {
-		return kept, &Truncation{kept, len(rs), "page cut to fit 60 KiB; the rest come with next_cursor (pass fields for smaller entries)"}
-	}
-	return len(rs), nil
-}
-
-func fit(rs []map[string]any) int {
-	total := 2 // []
-	for i, r := range rs {
-		b, _ := json.Marshal(r)
-		if total += len(b) + 1; total > PageBytes {
-			return max(i, 1)
-		}
-	}
-	return len(rs)
 }

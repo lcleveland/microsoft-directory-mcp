@@ -15,6 +15,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/lcleveland/microsoft-directory-mcp/internal/ad"
+	"github.com/lcleveland/microsoft-directory-mcp/internal/paging"
 )
 
 // adKind is what an ad_* tool reads: its object class filter, the brief
@@ -251,7 +252,7 @@ func (d Deps) members(ctx context.Context, in adGroupIn) (map[string]any, error)
 	if err != nil {
 		return nil, err
 	}
-	dns, next, err := d.AD.Values(ctx, dn, "member", off, ad.PageSize)
+	dns, next, err := d.AD.Values(ctx, dn, "member", off, paging.Size)
 	if err != nil {
 		return nil, err
 	}
@@ -263,7 +264,7 @@ func (d Deps) members(ctx context.Context, in adGroupIn) (map[string]any, error)
 	for i, e := range ents {
 		p.Results[i] = shape(e)
 	}
-	if kept, t := ad.Trim(p.Results); t != nil {
+	if kept, t := paging.Trim(p.Results); t != nil {
 		p.Results, p.Truncation, next = p.Results[:kept], t, off+kept
 	}
 	p.NextCursor = encodeOffset(next, bind)
@@ -294,7 +295,7 @@ func decodeOffset(cursor, bind string) (int, error) {
 		err = json.Unmarshal(b, &c)
 	}
 	if err != nil || c.Bind != bind || c.Off < 0 {
-		return 0, ad.ErrForeignCursor
+		return 0, paging.ErrForeignCursor
 	}
 	return c.Off, nil
 }
@@ -446,10 +447,13 @@ var ldapFilterGuide string
 
 // registerADGuides adds the LDAP filter guide the ad_* tools point to.
 func registerADGuides(s *mcp.Server) {
-	const uri = "ad://guide/ldap-filter"
-	s.AddResource(&mcp.Resource{URI: uri, Name: "ldap-filter", MIMEType: "text/markdown",
-		Description: "How to write the filter of ad_* searches: LDAP filter syntax, escaping, and filters for common questions."},
+	addGuide(s, "ad://guide/ldap-filter", "ldap-filter", ldapFilterGuide,
+		"How to write the filter of ad_* searches: LDAP filter syntax, escaping, and filters for common questions.")
+}
+
+func addGuide(s *mcp.Server, uri, name, text, desc string) {
+	s.AddResource(&mcp.Resource{URI: uri, Name: name, MIMEType: "text/markdown", Description: desc},
 		func(context.Context, *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
-			return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: uri, MIMEType: "text/markdown", Text: ldapFilterGuide}}}, nil
+			return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: uri, MIMEType: "text/markdown", Text: text}}}, nil
 		})
 }
