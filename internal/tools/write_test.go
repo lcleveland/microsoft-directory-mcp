@@ -39,6 +39,12 @@ func TestClassifyAD(t *testing.T) {
 		{"modify", "userAccountControl", "user", true, "", "call ad_user or ad_computer disable or enable instead"},
 		{"modify", "unicodePwd", "user", true, "", "call ad_user reset_password instead (the ad-passwords capability)"},
 		{"modify", "gPLink", "organizationalUnit", true, "", "call ad_gpo link instead"},
+		{"modify", "gPOptions", "organizationalUnit", true, "", "call ad_gpo block_inheritance instead (the ad-gpo-links capability)"},
+		{"modify", "gPLink", "organizationalUnit", false, "ad-gpo-links", ""},
+		{"modify", "msDS-PSOAppliesTo", "msDS-PasswordSettings", false, "ad-password-policy", ""},
+		{"modify", "msDS-LockoutThreshold", "msDS-PasswordSettings", false, "ad-password-policy", ""},
+		{"modify", "msDS-MinimumPasswordLength", "msDS-PasswordSettings", true, "", "call ad_policy edit instead"},
+		{"modify", "description", "msDS-PasswordSettings", false, "", "not a write this server makes"},
 		{"add", "", "", true, "", "call ad_user, ad_group or ad_computer create instead"},
 		{"delete", "", "", true, "", "call ad_object delete instead"},
 		{"rename", "", "", true, "", "call ad_object rename or move instead"},
@@ -80,9 +86,12 @@ func writeDeps(t *testing.T, e *ldap.Entry, caps ...string) (Deps, *bytes.Buffer
 		sent = append(sent, req)
 		return ad.Target{DC: "dc2.corp.example.com:636"}, nil
 	}
-	oldP := adProtected
+	oldP, oldG := adProtected, adGet
 	adProtected = func(*ad.Client, context.Context, string) (string, error) { return "", nil }
-	t.Cleanup(func() { adModify, adAdd, adProtected = old, oldA, oldP })
+	adGet = func(_ *ad.Client, _ context.Context, id, _ string, _ []string) (*ldap.Entry, error) {
+		return ldap.NewEntry(id, nil), nil
+	}
+	t.Cleanup(func() { adModify, adAdd, adProtected, adGet = old, oldA, oldP, oldG })
 	c := map[string]bool{}
 	for _, x := range caps {
 		c[x] = true
@@ -660,6 +669,240 @@ func TestObjectsAndDeleteRegister(t *testing.T) {
 			}
 		}
 		if slices.Contains(p, "must_change") || slices.Contains(p, "members") || name != "ad_object" && slices.Contains(p, "confirm") {
+			t.Errorf("%s shows a parameter of a write it lacks: %v", name, p)
+		}
+	}
+}
+
+const staffOU = "OU=Staff,DC=corp,DC=example,DC=com"
+
+func gpoDN(g string) string { return "CN={" + g + "},CN=Policies,CN=System,DC=corp,DC=example,DC=com" }
+
+// link and unlink are a compare-and-swap of gPLink with the GPO's link
+// added, changed or removed; block_inheritance sets gPOptions.
+func TestGPOLinkWrites(t *testing.T) {
+	a, b := gpoDN("AAAAAAAA-0000-4000-8000-000000000001"), gpoDN("BBBBBBBB-0000-4000-8000-000000000002")
+	old := "[LDAP://" + strings.ToLower(a) + ";0]"
+	d, buf, sent := writeDeps(t, ldap.NewEntry(staffOU, map[string][]string{"objectClass": {"top", "organizationalUnit"}, "gPLink": {old}}), "ad-gpo-links")
+	oldG := adGet
+	adGet = func(_ *ad.Client, _ context.Context, id, class string, _ []string) (*ldap.Entry, error) {
+		if class != adGPOs.class {
+			t.Errorf("gpo read as %s", class)
+		}
+		return ldap.NewEntry(strings.ToUpper(id[:2])+id[2:], nil), nil
+	}
+	t.Cleanup(func() { adGet = oldG })
+	ctx := context.Background()
+	changes := func(i int) string { return fmt.Sprint((*sent)[i].(*ldap.ModifyRequest).Changes) }
+
+	out, err := d.gpoLink(ctx, adIn{ActionParam: ActionParam{"link"}, ID: staffOU, GPO: b, Enforced: new(true), writeIn: writeIn{Reason: "r"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprint(swap("gPLink", old, "[LDAP://"+b+";2]"+old)); changes(0) != want {
+		t.Errorf("link: %s, want %s", changes(0), want)
+	}
+	if l := out["links"].([]ad.Link); len(l) != 2 || l[1] != (ad.Link{GPO: b, LinkOrder: 2, Enforced: true}) {
+		t.Errorf("links %+v", l)
+	}
+	if !strings.Contains(buf.String(), "capability=ad-gpo-links") || !strings.Contains(buf.String(), "attributes=[gPLink]") {
+		t.Errorf("audit log:\n%s", buf)
+	}
+	// Changing the existing link in place: disabled, moved to 1 of 1.
+	if _, err := d.gpoLink(ctx, adIn{ActionParam: ActionParam{"link"}, ID: staffOU, GPO: a, Enabled: new(false), LinkOrder: 1, writeIn: writeIn{Reason: "r"}}); err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprint(swap("gPLink", old, "[LDAP://"+strings.ToLower(a)+";1]")); changes(1) != want {
+		t.Errorf("relink: %s", changes(1))
+	}
+	if _, err := d.gpoLink(ctx, adIn{ActionParam: ActionParam{"unlink"}, ID: staffOU, GPO: a, writeIn: writeIn{Reason: "r"}}); err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprint(swap("gPLink", old, "")); changes(2) != want {
+		t.Errorf("unlink: %s", changes(2))
+	}
+	for _, in := range []adIn{
+		{ActionParam: ActionParam{"unlink"}, ID: staffOU, GPO: b, writeIn: writeIn{Reason: "r"}},
+		{ActionParam: ActionParam{"link"}, ID: staffOU, GPO: b, LinkOrder: 3, writeIn: writeIn{Reason: "r"}},
+		{ActionParam: ActionParam{"link"}, ID: staffOU, writeIn: writeIn{Reason: "r"}},
+	} {
+		if _, err := d.gpoLink(ctx, in); err == nil {
+			t.Errorf("%+v: sent", in)
+		}
+	}
+	// The OU has no gPOptions: blocking adds 1; inheriting, already so, sends nothing.
+	if _, err := d.blockInheritance(ctx, adIn{ID: staffOU, writeIn: writeIn{Reason: "r"}}); err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprint(swap("gPOptions", "", "1")); changes(3) != want {
+		t.Errorf("block: %s", changes(3))
+	}
+	if _, err := d.blockInheritance(ctx, adIn{ID: staffOU, Block: new(false), writeIn: writeIn{Reason: "r"}}); err == nil {
+		t.Error("inherit sent")
+	}
+	// A deleted GPO's link is unlinked by DN.
+	adGet = func(_ *ad.Client, _ context.Context, id, _ string, _ []string) (*ldap.Entry, error) {
+		return nil, fmt.Errorf("%q: %w", id, ad.ErrNoMatch)
+	}
+	if _, err := d.gpoLink(ctx, adIn{ActionParam: ActionParam{"unlink"}, ID: staffOU, GPO: a, writeIn: writeIn{Reason: "r"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.gpoLink(ctx, adIn{ActionParam: ActionParam{"link"}, ID: staffOU, GPO: a, writeIn: writeIn{Reason: "r"}}); err == nil {
+		t.Error("linked a missing GPO")
+	}
+	if len(*sent) != 5 {
+		t.Errorf("sent %d", len(*sent))
+	}
+}
+
+// A PSO write is refused while the PSO applies to a protected target, and
+// apply refuses one; otherwise apply and unapply are one permissive modify.
+func TestPSOWrites(t *testing.T) {
+	const (
+		pso  = "CN=weak," + "CN=Password Settings Container,CN=System,DC=corp,DC=example,DC=com"
+		da   = "CN=Domain Admins,CN=Users,DC=corp,DC=example,DC=com"
+		ops  = "CN=ops,CN=Users,DC=corp,DC=example,DC=com"
+		team = "CN=team,CN=Users,DC=corp,DC=example,DC=com"
+	)
+	oldR := adReaches
+	adReaches = func(_ *ad.Client, _ context.Context, dn string) (string, error) {
+		return map[string]string{da: "a built-in account or group (RID 512)", ops: "its member CN=x is a protected target"}[dn], nil
+	}
+	t.Cleanup(func() { adReaches = oldR })
+	notUniversal := func(d Deps) {
+		adGet = func(_ *ad.Client, _ context.Context, id, class string, _ []string) (*ldap.Entry, error) {
+			if class != psoTargets {
+				t.Errorf("applies_to read as %s", class)
+			}
+			if strings.HasPrefix(id, "CN=universal,") {
+				return nil, fmt.Errorf("%q: %w for this tool", id, ad.ErrNoMatch)
+			}
+			return ldap.NewEntry(id, nil), nil
+		}
+	}
+	entry := func(appliesTo ...string) *ldap.Entry {
+		return ldap.NewEntry(pso, map[string][]string{"objectClass": {"top", psoClass}, "msDS-PSOAppliesTo": appliesTo})
+	}
+	ctx := context.Background()
+	in := func(action string, appliesTo ...string) adPolicyIn {
+		return adPolicyIn{ActionParam: ActionParam{action}, ID: pso, AppliesTo: appliesTo, writeIn: writeIn{Reason: "r"},
+			Attributes: map[string]string{"msDS-MinimumPasswordLength": "8"}}
+	}
+	for _, tc := range []struct {
+		name  string
+		entry *ldap.Entry
+		in    adPolicyIn
+		says  string
+	}{
+		{"apply to Domain Admins", entry(), in("apply", da), "applies_to " + da + ": protected target"},
+		{"apply to a group reaching one", entry(team), in("apply", team, ops), "whatever capabilities are enabled: its member CN=x"},
+		{"edit one applying to Domain Admins", entry(team, da), in("edit"), pso + " already applies to " + da + ": protected target"},
+		{"unapply from one applying to Domain Admins", entry(da), in("unapply", da), "already applies to"},
+		{"too many to check", ldap.NewEntry(pso, map[string][]string{"objectClass": {psoClass}, "msDS-PSOAppliesTo;range=0-1499": {team}}), in("edit"), "too many"},
+		{"edit off the allowlist", entry(), adPolicyIn{ActionParam: ActionParam{"edit"}, ID: pso, writeIn: writeIn{Reason: "r"},
+			Attributes: map[string]string{"description": "x"}}, "not a write this server makes"},
+		{"apply nothing", entry(), in("apply"), "takes 1 to 20"},
+		{"apply to a universal group", entry(), in("apply", "CN=universal,CN=Users,DC=corp,DC=example,DC=com"), "a user or global security group"},
+		{"capability off", entry(), in("apply", team), "needs the ad-password-policy capability"},
+	} {
+		caps := []string{"ad-password-policy"}
+		if tc.name == "capability off" {
+			caps = nil
+		}
+		d, _, sent := writeDeps(t, tc.entry, caps...)
+		notUniversal(d)
+		if _, err := d.psoWrite(ctx, tc.in); err == nil || !strings.Contains(err.Error(), tc.says) {
+			t.Errorf("%s: %v", tc.name, err)
+		}
+		if len(*sent) != 0 {
+			t.Errorf("%s: sent %v", tc.name, (*sent)[0])
+		}
+	}
+
+	d, buf, sent := writeDeps(t, entry(team), "ad-password-policy")
+	out, err := d.psoWrite(ctx, in("apply", "CN=b,CN=Users,DC=corp,DC=example,DC=com", "CN=a,CN=Users,DC=corp,DC=example,DC=com", "CN=b,CN=Users,DC=corp,DC=example,DC=com"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := (*sent)[0].(*ldap.ModifyRequest)
+	if fmt.Sprint(m.Changes) != fmt.Sprint([]ldap.Change{{Operation: ldap.AddAttribute, Modification: ldap.PartialAttribute{Type: "msDS-PSOAppliesTo",
+		Vals: []string{"CN=a,CN=Users,DC=corp,DC=example,DC=com", "CN=b,CN=Users,DC=corp,DC=example,DC=com"}}}}) ||
+		ldap.FindControl(m.Controls, ldap.ControlTypeMicrosoftPermissiveModify) == nil || len(out["applies_to"].([]string)) != 2 {
+		t.Errorf("apply: %v %v %v", m.Changes, m.Controls, out)
+	}
+	if !strings.Contains(buf.String(), "capability=ad-password-policy") {
+		t.Errorf("audit log:\n%s", buf)
+	}
+	if _, err := d.psoWrite(ctx, in("unapply", team)); err != nil || (*sent)[1].(*ldap.ModifyRequest).Changes[0].Operation != ldap.DeleteAttribute {
+		t.Errorf("unapply: %v", err)
+	}
+	if _, err := d.psoWrite(ctx, in("edit")); err != nil || fmt.Sprint((*sent)[2].(*ldap.ModifyRequest).Changes) != fmt.Sprint([]ldap.Change{
+		{Operation: ldap.ReplaceAttribute, Modification: ldap.PartialAttribute{Type: "msDS-MinimumPasswordLength", Vals: []string{"8"}}}}) {
+		t.Errorf("edit: %v", err)
+	}
+}
+
+// create of a PSO needs every setting, and nothing else, under ad-password-policy.
+func TestCreatePSO(t *testing.T) {
+	d, buf, sent := writeDeps(t, adaEntry(nil), "ad-password-policy")
+	const psc = "CN=Password Settings Container,CN=System,DC=corp,DC=example,DC=com"
+	settings := map[string]string{}
+	for _, a := range psoSettings {
+		settings[a] = "1"
+	}
+	out, err := d.create(context.Background(), "ad_policy", psoClass, adIn{Parent: psc, Name: "strict", Attributes: settings, writeIn: writeIn{Reason: "r"}}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := (*sent)[0].(*ldap.AddRequest)
+	if out["dn"] != "CN=strict,"+psc || out["sAMAccountName"] != nil || req.Attributes[0].Vals[0] != psoClass || len(req.Attributes) != 1+len(psoSettings) {
+		t.Errorf("create: %v %v", out, req.Attributes)
+	}
+	if !strings.Contains(buf.String(), "capability=ad-password-policy") {
+		t.Errorf("audit log:\n%s", buf)
+	}
+	settings["msds-lockoutthreshold"] = settings["msDS-LockoutThreshold"]
+	delete(settings, "msDS-LockoutThreshold")
+	if _, err := d.create(context.Background(), "ad_policy", psoClass, adIn{Parent: psc, Name: "y", Attributes: settings, writeIn: writeIn{Reason: "r"}}, ""); err != nil {
+		t.Errorf("a setting in another case: %v", err)
+	}
+	delete(settings, "msDS-LockoutDuration")
+	if _, err := d.create(context.Background(), "ad_policy", psoClass, adIn{Parent: psc, Name: "x", Attributes: settings, writeIn: writeIn{Reason: "r"}}, ""); err == nil ||
+		!strings.Contains(err.Error(), "missing msDS-LockoutDuration") {
+		t.Errorf("missing: %v", err)
+	}
+	settings["msDS-LockoutDuration"], settings["description"] = "1", "x"
+	if _, err := d.create(context.Background(), "ad_policy", psoClass, adIn{Parent: psc, Name: "x", Attributes: settings, writeIn: writeIn{Reason: "r"}}, ""); err == nil {
+		t.Error("created with description")
+	}
+	if len(*sent) != 2 {
+		t.Errorf("sent %d", len(*sent))
+	}
+}
+
+func TestPolicyWritesRegister(t *testing.T) {
+	cs := writeSession(t, "ad-gpo-links", "ad-password-policy")
+	got := listed(t, cs)
+	for name, want := range map[string][]string{
+		"ad_gpo":    {"search", "get", "links", "link", "unlink", "block_inheritance"},
+		"ad_policy": {"domain_default", "psos", "create", "edit", "apply", "unapply"},
+		"ad_ou":     {"search", "get", "tree"},
+	} {
+		if !slices.Equal(got[name], want) {
+			t.Errorf("%s: %v, want %v", name, got[name], want)
+		}
+	}
+	for name, want := range map[string][]string{
+		"ad_gpo":    {"reason", "gpo", "link_order", "enforced", "enabled", "block"},
+		"ad_policy": {"reason", "name", "attributes", "applies_to"},
+	} {
+		p := props(t, cs, name)
+		for _, w := range want {
+			if !slices.Contains(p, w) {
+				t.Errorf("%s lacks %s: %v", name, w, p)
+			}
+		}
+		if slices.Contains(p, "parent") || slices.Contains(p, "confirm") || name == "ad_gpo" && slices.Contains(p, "attributes") {
 			t.Errorf("%s shows a parameter of a write it lacks: %v", name, p)
 		}
 	}

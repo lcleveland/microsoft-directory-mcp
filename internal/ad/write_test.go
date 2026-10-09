@@ -55,7 +55,9 @@ func seedProtected(f *fakeDir) map[string]string {
 		"in builtin":             "CN=operator,CN=Users," + corpDN,
 		"child in root":          "CN=childops,CN=Users," + childDN,
 		"tokenGroups unreadable": "CN=hidden,CN=Users," + corpDN,
+		"Domain Controllers OU":  "OU=Domain Controllers," + corpDN,
 	}
+	f.tree[strings.ToLower(cases["Domain Controllers OU"])] = map[string][]string{"objectClass": {"top", "organizationalUnit"}}
 	user(cases["adminCount"], corpSID+"-1105", users, map[string][]string{"adminCount": {"1"}})
 	user(cases["built-in"], corpSID+"-500", users, nil)
 	user(cases["isCriticalSystemObject"], corpSID+"-1106", users, map[string][]string{"isCriticalSystemObject": {"TRUE"}})
@@ -94,7 +96,7 @@ func TestModifyRails(t *testing.T) {
 	}
 
 	for name, dn := range cases {
-		_, err := c.Modify(ctx, dn, userClass, nil, describe)
+		_, err := c.Modify(ctx, dn, "(objectClass=*)", nil, describe)
 		if !errors.Is(err, ErrProtected) {
 			t.Errorf("%s: want a protected refusal, got %v", name, err)
 		}
@@ -170,6 +172,57 @@ func TestProtected(t *testing.T) {
 	}
 	if _, err := c.Protected(context.Background(), "CN=gone,CN=Users,"+corpDN); !errors.Is(err, ErrNoMatch) {
 		t.Errorf("missing: %v", err)
+	}
+	if len(f.modifies) != 0 {
+		t.Errorf("wrote: %q", f.modifies)
+	}
+}
+
+// Reaches refuses a protected user or group, and a group with a protected
+// member, direct or nested, or one only just put in a protected group.
+func TestReaches(t *testing.T) {
+	f := newFakeDir()
+	cases := seedProtected(f)
+	c := f.client(srvConfig())
+	f.tree[strings.ToLower(corpDN)]["objectSid"] = []string{sid(corpSID)}
+	da := "CN=Domain Admins,CN=Users," + corpDN
+	f.tree[strings.ToLower(da)] = map[string][]string{"objectClass": {"top", "group"}, "objectSid": {sid(corpSID + "-512")},
+		"isCriticalSystemObject": {"TRUE"}}
+	group := func(name, rid string, memberOf ...string) string {
+		dn := "CN=" + name + ",CN=Users," + corpDN
+		attrs := map[string][]string{"objectClass": {"top", "group"}, "objectSid": {sid(corpSID + "-" + rid)}, "memberOf": memberOf}
+		for _, g := range memberOf {
+			attrs["tokenGroups"] = append(attrs["tokenGroups"], f.tree[strings.ToLower(g)]["objectSid"]...)
+		}
+		f.tree[strings.ToLower(dn)] = attrs
+		return dn
+	}
+	member := func(dn string, groups ...string) {
+		f.tree[strings.ToLower(dn)]["memberOf"] = append(f.tree[strings.ToLower(dn)]["memberOf"], groups...)
+	}
+	team := group("team", "1301")
+	member(plain, team)
+	outer := group("outer", "1302")
+	ops := group("ops", "1303", outer)
+	// fresh joined Domain Admins after SDProp last ran: no adminCount yet, and its tokenGroups aren't read.
+	fresh := "CN=fresh,CN=Users," + corpDN
+	f.tree[strings.ToLower(fresh)] = map[string][]string{"objectClass": {"top", "user"}, "objectSid": {sid(corpSID + "-1304")}}
+	member(fresh, ops, da)
+	withAdmin := group("withadmin", "1305")
+	member(cases["adminCount"], withAdmin)
+	withDA := group("withda", "1306")
+	member(da, withDA)
+
+	for dn, want := range map[string]string{
+		plain: "", team: "", lonely: "",
+		cases["adminCount"]: "adminCount=1", da: "isCriticalSystemObject", cases["nested"]: "protected group",
+		ops: "its member " + fresh, outer: "its member " + fresh, withAdmin: "its member " + cases["adminCount"],
+		withDA: "its member " + da,
+	} {
+		why, err := c.Reaches(context.Background(), dn)
+		if err != nil || want == "" && why != "" || want != "" && !strings.Contains(strings.ToLower(why), strings.ToLower(want)) {
+			t.Errorf("%s: %q %v, want %q", dn, why, err, want)
+		}
 	}
 	if len(f.modifies) != 0 {
 		t.Errorf("wrote: %q", f.modifies)

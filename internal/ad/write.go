@@ -127,6 +127,8 @@ func protected(e *ldap.Entry) string {
 		return "isCriticalSystemObject"
 	case uac&0x2000 != 0:
 		return "a domain controller (SERVER_TRUST_ACCOUNT)"
+	case dcOU(e.DN):
+		return "the Domain Controllers OU: policy linked there reaches every domain controller"
 	case isSID && rid < 1000:
 		return fmt.Sprintf("a built-in account or group (RID %d)", rid)
 	// An account always has its primary group in tokenGroups, so none at
@@ -148,6 +150,19 @@ func protected(e *ldap.Entry) string {
 	return ""
 }
 
+// dcOU reports whether dn is a domain's Domain Controllers OU, which can't
+// be renamed or moved.
+func dcOU(dn string) bool {
+	p, err := ldap.ParseDN(dn)
+	if err != nil || len(p.RDNs) < 2 || len(p.RDNs[0].Attributes) != 1 {
+		return false
+	}
+	if a := p.RDNs[0].Attributes[0]; !strings.EqualFold(a.Type, "OU") || !strings.EqualFold(a.Value, "Domain Controllers") {
+		return false
+	}
+	return !slices.ContainsFunc(p.RDNs[1:], func(r *ldap.RelativeDN) bool { return !strings.EqualFold(r.Attributes[0].Type, "DC") })
+}
+
 // rid is the last sub-authority of a binary SID.
 func rid(sid []byte) (uint32, bool) {
 	s := SIDString(sid)
@@ -160,20 +175,85 @@ func rid(sid []byte) (uint32, bool) {
 // target, or "" when it is not: for the other objects a write names, such
 // as the members a membership write adds or removes.
 func (c *Client) Protected(ctx context.Context, dn string) (string, error) {
-	d, err := c.DomainOf(ctx, dn)
+	_, _, e, err := c.preRead(ctx, dn)
 	if err != nil {
 		return "", err
+	}
+	return protected(e), nil
+}
+
+// preRead reads dn's preRead attributes from a DC of its domain.
+func (c *Client) preRead(ctx context.Context, dn string) (Domain, Conn, *ldap.Entry, error) {
+	d, err := c.DomainOf(ctx, dn)
+	if err != nil {
+		return d, nil, nil, err
 	}
 	conn, _, err := c.Conn(ctx, d)
 	if err != nil {
-		return "", err
+		return d, nil, nil, err
 	}
 	res, err := conn.Search(ldap.NewSearchRequest(dn, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 1, 0, false, "(objectClass=*)", preRead, nil))
 	if ldap.IsErrorWithCode(err, ldap.LDAPResultNoSuchObject) || err == nil && len(res.Entries) == 0 {
-		return "", fmt.Errorf("%q: %w", dn, ErrNoMatch)
+		return d, nil, nil, fmt.Errorf("%q: %w", dn, ErrNoMatch)
 	}
+	if err != nil {
+		return d, nil, nil, err
+	}
+	return d, conn, res.Entries[0], nil
+}
+
+// Reaches reads dn, a user or group, and says why a policy applied to it
+// reaches a protected target, or "" when none does: it is one, or it is a
+// group with one among its members, direct or nested. A member counts when
+// it has adminCount, is a critical system object (every built-in principal
+// is) or a domain controller, or is in a protected group of the domain,
+// which also catches one added since SDProp last set its adminCount.
+// ponytail: members by primary group only, and those in another domain's
+// protected groups (Enterprise Admins), count through adminCount alone.
+func (c *Client) Reaches(ctx context.Context, dn string) (string, error) {
+	d, conn, e, err := c.preRead(ctx, dn)
 	if err != nil {
 		return "", err
 	}
-	return protected(res.Entries[0]), nil
+	if why := protected(e); why != "" || !slices.ContainsFunc(e.GetAttributeValues("objectClass"), func(c string) bool { return strings.EqualFold(c, "group") }) {
+		return why, nil
+	}
+	head, err := conn.Search(ldap.NewSearchRequest(d.DN, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 1, 0, false, "(objectClass=*)", []string{"objectSid"}, nil))
+	if err != nil {
+		return "", err
+	}
+	domSID := ""
+	if len(head.Entries) == 1 {
+		domSID = SIDString(head.Entries[0].GetRawAttributeValue("objectSid"))
+	}
+	if !strings.HasPrefix(domSID, "S-1-5-21-") {
+		return "", fmt.Errorf("%s: can't read the domain's objectSid, so its protected groups can't be found", d.DN)
+	}
+	f := "(|"
+	for _, r := range builtinProtected {
+		f += sidFilter(fmt.Sprintf("S-1-5-32-%d", r))
+	}
+	for _, r := range domainProtected {
+		f += sidFilter(fmt.Sprintf("%s-%d", domSID, r))
+	}
+	groups, err := conn.Search(ldap.NewSearchRequest(d.DN, ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false, f+")", []string{"1.1"}, nil))
+	if err != nil {
+		return "", err
+	}
+	const inChain = "(memberOf:1.2.840.113556.1.4.1941:="
+	f = "(&" + inChain + ldap.EscapeFilter(e.DN) + ")(|(adminCount=1)(isCriticalSystemObject=TRUE)(userAccountControl:1.2.840.113556.1.4.803:=8192)"
+	for _, g := range groups.Entries {
+		f += inChain + ldap.EscapeFilter(g.DN) + ")"
+	}
+	hits, err := searchDNs(conn, d.DN, f+"))")
+	if err != nil || len(hits) == 0 {
+		return "", err
+	}
+	return "its member " + hits[0] + " is a protected target, or is in a protected group", nil
+}
+
+// sidFilter matches the object whose objectSid is s.
+func sidFilter(s string) string {
+	b, _ := SIDBytes(s)
+	return "(objectSid=" + escapeBytes(b) + ")"
 }

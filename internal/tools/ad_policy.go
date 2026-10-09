@@ -294,7 +294,7 @@ var (
 			"GPOs are linked). get: one OU by DN or objectGUID, with gPLink (each linked GPO's DN, link_order, enforced "+
 			"and disabled), gPOptions (1 blocks inheritance) and managedBy. tree: the OUs one level under id (an OU or "+
 			"domain head; without id, under each domain head, or only domain's) with their gPLink and gPOptions.", adOUs,
-		adExtra{Action{Name: "tree"}, Deps.tree})
+		adExtra{Action: Action{Name: "tree"}, run: Deps.tree})
 	adGPOTool = adReadTool("ad_gpo", "policy", "Active Directory GPOs",
 		"Group Policy objects (groupPolicyContainer) and their links; settings are never read. search: list GPOs as "+
 			"briefs (dn, displayName, name: the GPO's GUID, flags as status, versionNumber, whenChanged). get: one GPO by "+
@@ -302,9 +302,20 @@ var (
 			"domain head or site (id, or domain for a domain head), its own links in link order (enforced, disabled), "+
 			"block_inheritance, and inheritance: every link reaching it by precedence (1 wins), as GPMC's Group Policy "+
 			"Inheritance tab lists them: enforced links first, then the nearest container's.", adGPOs,
-		adExtra{Action{Name: "get"}, Deps.gpoGet}, adExtra{Action{Name: "links"}, Deps.gpoLinks})
-	adPolicyTool = Tool{Name: "ad_policy", Group: "policy", Actions: []Action{{Name: "domain_default"}, {Name: "psos", ADProbe: "pso-read"}},
+		adExtra{Action: Action{Name: "get"}, run: Deps.gpoGet}, adExtra{Action: Action{Name: "links"}, run: Deps.gpoLinks},
+		adExtra{Action: Action{Name: "link", Capabilities: []string{"ad-gpo-links"}}, run: Deps.gpoLink, doc: gpoWriteDoc},
+		adExtra{Action: Action{Name: "unlink", Capabilities: []string{"ad-gpo-links"}}, run: Deps.gpoLink},
+		adExtra{Action: Action{Name: "block_inheritance", Capabilities: []string{"ad-gpo-links"}}, run: Deps.blockInheritance})
+	adPolicyTool = Tool{Name: "ad_policy", Group: "policy", Actions: []Action{{Name: "domain_default"}, {Name: "psos", ADProbe: "pso-read"},
+		{Name: "create", ADProbe: "pso-read", Capabilities: []string{"ad-password-policy"}},
+		{Name: "edit", ADProbe: "pso-read", Capabilities: []string{"ad-password-policy"}},
+		{Name: "apply", ADProbe: "pso-read", Capabilities: []string{"ad-password-policy"}},
+		{Name: "unapply", ADProbe: "pso-read", Capabilities: []string{"ad-password-policy"}}},
 		add: func(s *mcp.Server, d Deps, t Tool, visible []string) {
+			doc := ""
+			if slices.Contains(visible, "apply") {
+				doc = psoWriteDoc
+			}
 			addActionTool(s, d, t, &mcp.Tool{Name: t.Name, Title: "Active Directory password policy", Annotations: readOnly,
 				Description: "Password and lockout policy. domain_default: each domain's default policy from its head " +
 					"(or only domain's): minPwdLength, pwdHistoryLength, maxPwdAge, minPwdAge, pwdProperties flags, " +
@@ -313,8 +324,17 @@ var (
 					"password policies (PSOs) of each domain as briefs (dn, name, precedence: lower wins, minimum length, " +
 					"lockout threshold, maximum age, appliesToCount); with id (DN or objectGUID), one PSO with every " +
 					"setting and msDS-PSOAppliesTo (the users and groups it applies to). ad_user resultant_policy says which " +
-					"applies to a user.\n\n" + adSearchDoc},
-				visible, func(ctx context.Context, _ *mcp.CallToolRequest, in adIn) (*mcp.CallToolResult, map[string]any, error) {
+					"applies to a user.\n\n" + adSearchDoc + doc},
+				visible, func(ctx context.Context, _ *mcp.CallToolRequest, pin adPolicyIn) (*mcp.CallToolResult, map[string]any, error) {
+					in := pin.read()
+					switch in.Action {
+					case "create":
+						out, err := d.psoCreate(ctx, pin)
+						return nil, out, err
+					case "edit", "apply", "unapply":
+						out, err := d.psoWrite(ctx, pin)
+						return nil, out, err
+					}
 					if in.Action == "domain_default" {
 						res, skipped, err := d.domainDefault(ctx, in.Domain)
 						if err != nil {
@@ -331,3 +351,203 @@ var (
 				})
 		}}
 )
+
+// gpoWriteDoc describes ad_gpo's writes when they show.
+const gpoWriteDoc = "\n\nWrites (the ad-gpo-links capability), on one OU, domain head or site by id, with a reason; GPOs " +
+	"themselves are never created or changed. link: links gpo to id, or changes its link there: link_order (1 wins; default " +
+	"where it is, or last), enforced and enabled. unlink: removes gpo's link from id. block_inheritance: block=true (the " +
+	"default) stops id inheriting unenforced links from above; block=false inherits again. Each is one compare-and-swap of " +
+	"gPLink (or gPOptions) on the PDC emulator, so it fails rather than overwrites a change made since the read: read and " +
+	"retry. The Domain Controllers OU is refused. The reply's links are id's links after the change; ad_gpo links shows " +
+	"what reaches it."
+
+// psoWriteDoc describes ad_policy's writes when they show.
+const psoWriteDoc = "\n\nWrites (the ad-password-policy capability), with a reason. create: a PSO named name in domain's " +
+	"Password Settings Container (default the forest root domain), with every setting in attributes; it applies to nobody " +
+	"until apply. edit: replaces settings of one PSO by id. Settings are LDAP values: msDS-PasswordSettingsPrecedence (lower " +
+	"wins), msDS-MinimumPasswordLength, msDS-PasswordHistoryLength and msDS-LockoutThreshold as numbers; " +
+	"msDS-PasswordComplexityEnabled and msDS-PasswordReversibleEncryptionEnabled as TRUE or FALSE; " +
+	"msDS-MinimumPasswordAge, msDS-MaximumPasswordAge, msDS-LockoutObservationWindow and msDS-LockoutDuration as negative " +
+	"100-nanosecond intervals (-864000000000 is one day, -18000000000 thirty minutes; -9223372036854775808 is never). " +
+	"apply, unapply: adds or removes up to 20 users or global security groups (applies_to) on one PSO by id; one already " +
+	"there (or already gone) is no error. Protected targets are refused: applying to a protected user or group, or to a group " +
+	"with one among its members (direct or nested), and any write to a PSO that already applies to one."
+
+// psoClass is a PSO's objectClass.
+const psoClass = "msDS-PasswordSettings"
+
+// psoSettings are the settings ad_policy create and edit set: every one a
+// PSO must have, and nothing else.
+var psoSettings = []string{"msDS-PasswordSettingsPrecedence", "msDS-MinimumPasswordLength", "msDS-PasswordHistoryLength",
+	"msDS-PasswordComplexityEnabled", "msDS-PasswordReversibleEncryptionEnabled", "msDS-MinimumPasswordAge",
+	"msDS-MaximumPasswordAge", "msDS-LockoutThreshold", "msDS-LockoutObservationWindow", "msDS-LockoutDuration"}
+
+func init() {
+	for _, a := range psoSettings {
+		adOps = append(adOps, adOp{"modify", a, "ad-password-policy", "ad_policy edit"})
+	}
+}
+
+// gpoLink is ad_gpo link or unlink (ad-gpo-links): one GPO's link on an
+// OU, domain head or site (id), set or removed by a compare-and-swap of
+// its gPLink. The Domain Controllers OU is a protected target.
+func (d Deps) gpoLink(ctx context.Context, in adIn) (map[string]any, error) {
+	if in.GPO == "" {
+		return nil, errors.New(in.Action + " needs gpo (a GPO by DN or GUID) and id (the OU, domain head or site)")
+	}
+	var after []ad.Link
+	out, err := d.adWrite(ctx, adWrite{tool: "ad_gpo", action: in.Action, id: in.ID, class: somClass, in: in.writeIn, attrs: []string{"gPLink"},
+		changes: func(e *ldap.Entry) ([]ldap.Change, error) {
+			g, err := adGet(d.AD, ctx, in.GPO, adGPOs.class, []string{"1.1"})
+			// A deleted GPO's link stays behind: unlink takes it by DN.
+			if errors.Is(err, ad.ErrNoMatch) && in.Action == "unlink" && strings.Contains(in.GPO, "=") {
+				g, err = ldap.NewEntry(in.GPO, nil), nil
+			}
+			if err != nil {
+				return nil, fmt.Errorf("gpo %w", err)
+			}
+			old := e.GetAttributeValue("gPLink")
+			links := ad.ParseGPLink(old)
+			if in.Action == "unlink" {
+				n := len(links)
+				if links = slices.DeleteFunc(links, func(l ad.Link) bool { return strings.EqualFold(l.GPO, g.DN) }); len(links) == n {
+					return nil, fmt.Errorf("%s is not linked to %s", g.DN, e.DN)
+				}
+			} else {
+				var disabled *bool
+				if in.Enabled != nil {
+					disabled = new(!*in.Enabled)
+				}
+				if links, err = ad.SetLink(links, g.DN, in.LinkOrder, in.Enforced, disabled); err != nil {
+					return nil, err
+				}
+			}
+			after = ad.ParseGPLink(ad.FormatGPLink(links))
+			return swap("gPLink", old, ad.FormatGPLink(links)), nil
+		}})
+	if err != nil {
+		return nil, err
+	}
+	out["links"] = append([]ad.Link{}, after...) // [] rather than null when none is left
+	return out, nil
+}
+
+// blockInheritance is ad_gpo block_inheritance (ad-gpo-links): gPOptions
+// on an OU or domain head, 1 to block, 0 to inherit, as a compare-and-swap.
+func (d Deps) blockInheritance(ctx context.Context, in adIn) (map[string]any, error) {
+	v := "1"
+	if in.Block != nil && !*in.Block {
+		v = "0"
+	}
+	return d.adWrite(ctx, adWrite{tool: "ad_gpo", action: "block_inheritance", id: in.ID, class: ouOrDomain, in: in.writeIn,
+		attrs: []string{"gPOptions"}, changes: func(e *ldap.Entry) ([]ldap.Change, error) {
+			// No gPOptions at all inherits, as 0 does.
+			if old := e.GetAttributeValue("gPOptions"); cmp.Or(old, "0") != v {
+				return swap("gPOptions", old, v), nil
+			}
+			return nil, fmt.Errorf("%s already has gPOptions %s", e.DN, v)
+		}})
+}
+
+// adPolicyIn is ad_policy's input.
+type adPolicyIn struct {
+	ActionParam
+	ID     string   `json:"id,omitempty" jsonschema:"psos, edit, apply, unapply: a PSO by DN or objectGUID"`
+	Query  string   `json:"query,omitempty" jsonschema:"psos: name lookup by ambiguous name resolution (prefix match)"`
+	Filter string   `json:"filter,omitempty" jsonschema:"psos: raw LDAP filter, ANDed with the object class; read the ad://guide/ldap-filter resource first"`
+	Domain string   `json:"domain,omitempty" jsonschema:"domain_default, psos: only this domain (DNS or NetBIOS name) instead of every domain; create: the domain to create the PSO in, default the forest root domain"`
+	Fields []string `json:"fields,omitempty" jsonschema:"LDAP attribute names to return instead of the default set"`
+	Cursor string   `json:"cursor,omitempty" jsonschema:"next_cursor from the previous call with the same arguments, unchanged"`
+	writeIn
+	Name       string            `json:"name,omitempty" jsonschema:"writes, create: the PSO's name (its cn)"`
+	Attributes map[string]string `json:"attributes,omitempty" jsonschema:"writes, create, edit: PSO settings by LDAP name (msDS-*), as LDAP values; create needs every one"`
+	AppliesTo  []string          `json:"applies_to,omitempty" jsonschema:"writes, apply, unapply: up to 20 users or global security groups (a PSO ignores other groups) by id (a DN, SID, GUID, UPN, sAMAccountName or DOMAIN\\sam)"`
+}
+
+func (in adPolicyIn) read() adIn {
+	return adIn{ActionParam: in.ActionParam, ID: in.ID, Query: in.Query, Filter: in.Filter, Domain: in.Domain, Fields: in.Fields, Cursor: in.Cursor}
+}
+
+// psoCreate is ad_policy create (ad-password-policy): one PSO, applying to
+// nobody until apply, in a domain's Password Settings Container.
+func (d Deps) psoCreate(ctx context.Context, in adPolicyIn) (map[string]any, error) {
+	name := in.Domain
+	if name == "" && d.Config.AD != nil {
+		name = d.Config.AD.Forest
+	}
+	dom, err := d.AD.Lookup(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	return d.create(ctx, "ad_policy", psoClass, adIn{Name: in.Name, Parent: ad.PSOContainer + "," + dom.DN, Attributes: in.Attributes, writeIn: in.writeIn}, "")
+}
+
+// psoWrite is ad_policy edit, apply or unapply (ad-password-policy) of one
+// PSO. A PSO that already applies to a protected target, or to a group
+// reaching one, is refused, and so is applying one to such a user or group.
+func (d Deps) psoWrite(ctx context.Context, in adPolicyIn) (map[string]any, error) {
+	if n := len(in.AppliesTo); in.Action != "edit" && (n == 0 || n > maxMembers) {
+		return nil, fmt.Errorf("%s takes 1 to %d applies_to, got %d: call again for more", in.Action, maxMembers, n)
+	}
+	var dns []string
+	w := adWrite{tool: "ad_policy", action: in.Action, id: in.ID, class: adPSOs.class, in: in.writeIn, attrs: []string{"msDS-PSOAppliesTo"}}
+	w.changes = func(e *ldap.Entry) ([]ldap.Change, error) {
+		// More values than a search returns at once come as a range: fail closed.
+		if slices.ContainsFunc(e.Attributes, func(a *ldap.EntryAttribute) bool { return strings.Contains(a.Name, ";range=") }) {
+			return nil, fmt.Errorf("%s applies to too many users and groups to check", e.DN)
+		}
+		if err := d.reach(ctx, e.GetAttributeValues("msDS-PSOAppliesTo"), e.DN+" already applies to"); err != nil {
+			return nil, err
+		}
+		if in.Action == "edit" {
+			return replaces(in.Attributes)
+		}
+		for _, id := range in.AppliesTo {
+			// Get, not Resolve, so a DN is checked against the class too.
+			t, err := adGet(d.AD, ctx, id, psoTargets, []string{"1.1"})
+			if err != nil {
+				return nil, fmt.Errorf("applies_to (a user or global security group) %w", err)
+			}
+			dns = append(dns, t.DN)
+		}
+		slices.Sort(dns)
+		dns = slices.Compact(dns)
+		op := uint(ldap.DeleteAttribute)
+		if in.Action == "apply" {
+			op = ldap.AddAttribute
+			if err := d.reach(ctx, dns, "applies_to"); err != nil {
+				return nil, err
+			}
+		}
+		return []ldap.Change{{Operation: op, Modification: ldap.PartialAttribute{Type: "msDS-PSOAppliesTo", Vals: dns}}}, nil
+	}
+	if in.Action != "edit" {
+		w.controls = []ldap.Control{ldap.NewControlString(ldap.ControlTypeMicrosoftPermissiveModify, true, "")}
+	}
+	out, err := d.adWrite(ctx, w)
+	if err != nil {
+		return nil, err
+	}
+	if dns != nil {
+		out["applies_to"] = dns
+	}
+	return out, nil
+}
+
+// psoTargets are what a PSO applies to: users and global security groups.
+// A global group's members are all in its domain, where Reaches looks.
+const psoTargets = "(|(&(objectCategory=person)(objectClass=user))(&(objectClass=group)(groupType:1.2.840.113556.1.4.803:=2147483650)))"
+
+// reach refuses when any of dns is, or (a group) reaches, a protected target.
+func (d Deps) reach(ctx context.Context, dns []string, what string) error {
+	for _, dn := range dns {
+		why, err := adReaches(d.AD, ctx, dn)
+		if err != nil {
+			return fmt.Errorf("%s %w", what, err)
+		}
+		if why != "" {
+			return fmt.Errorf("%s %s: %w: %s", what, dn, ad.ErrProtected, why)
+		}
+	}
+	return nil
+}

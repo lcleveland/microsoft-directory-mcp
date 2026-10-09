@@ -645,8 +645,10 @@ let
     added = call("entra_audit", {"action": "search", "filter": "activityDisplayName eq 'Add user'"})["results"]
     assert [a["initiatedBy"]["user"]["userPrincipalName"] for a in added] == ["admin@example.com"], added
 
-    # Writes: the server runs with --capabilities ad-account-state,ad-passwords,ad-group-membership,ad-objects,ad-delete,entra-account-state.
-    assert ad["enabled_capabilities"] == ["ad-account-state", "ad-passwords", "ad-group-membership", "ad-objects", "ad-delete"], ad
+    # Writes: the server runs with --capabilities ad-account-state,ad-passwords,ad-group-membership,ad-objects,ad-delete,
+    # ad-gpo-links,ad-password-policy,entra-account-state.
+    assert ad["enabled_capabilities"] == ["ad-account-state", "ad-passwords", "ad-group-membership", "ad-objects", "ad-delete",
+                                          "ad-gpo-links", "ad-password-policy"], ad
     assert entra["enabled_capabilities"] == ["entra-account-state"], entra
     api = next(t for t in listed["result"]["tools"] if t["name"] == "ad_api")
     assert api["inputSchema"]["properties"]["action"]["enum"] == ["search", "modify", "add", "delete", "rename"], api
@@ -733,6 +735,26 @@ let
     print("ad_object restore", json.dumps(w))
     assert w["restored_as"] == "CN=vm-renamed,OU=vm-ou,${base}", w
     assert call("ad_user", {"action": "get", "id": "vm-new", "fields": ["objectGUID"]})["objectGUID"] == gone[0]["objectGUID"]
+
+    # ad-password-policy: applying vm-pso to Domain Admins is refused, and vm-pso still applies to vm-team alone.
+    vm_pso = "CN=vm-pso,CN=Password Settings Container,CN=System,${base}"
+    why = refused("ad_policy", {"action": "apply", "id": vm_pso, "applies_to": ["Domain Admins"], "reason": "vm-test pso protected"})
+    print("ad_policy apply Domain Admins", why)
+    assert "protected target" in why, why
+    assert call("ad_policy", {"action": "psos", "id": vm_pso})["msDS-PSOAppliesTo"] == ["CN=vm-team,CN=Users,${base}"]
+
+    # ad-gpo-links: unlink vm-gpo-a from vm-ou, link it back enforced; links reflects each. The DC OU is refused.
+    why = refused("ad_gpo", {"action": "link", "id": "OU=Domain Controllers,${base}", "gpo": "${gpoA}", "reason": "vm-test link dc ou"})
+    print("ad_gpo link Domain Controllers", why)
+    assert "protected target" in why, why
+    w = call("ad_gpo", {"action": "unlink", "id": "OU=vm-ou,${base}", "gpo": "${gpoA}", "reason": "vm-test unlink"})
+    print("ad_gpo unlink", json.dumps(w))
+    assert [x["gpo"].lower() for x in w["links"]] == ["${lib.toLower (gpoDN gpoB)}"] and w["dc"] == "${dcHost}:636", w
+    w = call("ad_gpo", {"action": "link", "id": "OU=vm-ou,${base}", "gpo": "${gpoA}", "enforced": True, "reason": "vm-test link"})
+    print("ad_gpo link", json.dumps(w))
+    links = call("ad_gpo", {"action": "links", "id": "OU=vm-ou,${base}"})
+    assert [(x["displayName"], x["link_order"], x["enforced"]) for x in links["links"]] == [("vm-gpo-b", 1, True), ("vm-gpo-a", 2, True)], links
+    assert [x["displayName"] for x in links["inheritance"]] == ["vm-gpo-b", "vm-gpo-a", "Default Domain Policy"], links
 
     # entra-account-state: the synced user's disable is refused and routed to AD; a cloud user's goes through.
     why = refused("entra_user", {"action": "disable", "id": synced["id"], "reason": "vm-test entra synced"})
@@ -902,7 +924,7 @@ pkgs.testers.runNixOSTest {
         logLevel = "debug";
         extraArgs = [
           "--capabilities"
-          "ad-account-state,ad-passwords,ad-group-membership,ad-objects,ad-delete,entra-account-state"
+          "ad-account-state,ad-passwords,ad-group-membership,ad-objects,ad-delete,ad-gpo-links,ad-password-policy,entra-account-state"
         ];
         http.authTokenFile = "/run/mcp-bearer";
         ad = {

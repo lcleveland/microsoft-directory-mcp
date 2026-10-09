@@ -140,6 +140,11 @@ type adIn struct {
 	Sam        string            `json:"sam_account_name,omitempty" jsonschema:"writes, create: its sAMAccountName; default name (a computer's gets a $)"`
 	UPN        string            `json:"upn,omitempty" jsonschema:"writes, create: a user's userPrincipalName"`
 	Attributes map[string]string `json:"attributes,omitempty" jsonschema:"writes, create, edit: attributes to set by LDAP name, from the allowlist the tool description gives; on edit an empty value clears one"`
+	GPO        string            `json:"gpo,omitempty" jsonschema:"writes, link, unlink: the GPO, by DN or GUID, to link to or unlink from id"`
+	LinkOrder  int               `json:"link_order,omitempty" jsonschema:"writes, link: the link's place on id, 1 winning; default where it is, or last when new"`
+	Enforced   *bool             `json:"enforced,omitempty" jsonschema:"writes, link: enforce the link, so it beats block inheritance below; default unchanged, or off when new"`
+	Enabled    *bool             `json:"enabled,omitempty" jsonschema:"writes, link: whether the link applies at all; default unchanged, or on when new"`
+	Block      *bool             `json:"block,omitempty" jsonschema:"writes, block_inheritance: true (the default) blocks inheritance on id; false inherits again"`
 }
 
 // keys are the fields asked for, or def.
@@ -380,7 +385,7 @@ const adSearchDoc = "Lists search every domain of the forest (domain narrows to 
 
 // createAction is the create action of the AD tool for class.
 func createAction(tool, class string) adExtra {
-	return adExtra{Action{Name: "create", Capabilities: []string{"ad-objects"}}, func(d Deps, ctx context.Context, in adIn) (map[string]any, error) {
+	return adExtra{Action: Action{Name: "create", Capabilities: []string{"ad-objects"}}, run: func(d Deps, ctx context.Context, in adIn) (map[string]any, error) {
 		return d.create(ctx, tool, class, in, "")
 	}}
 }
@@ -390,6 +395,7 @@ func createAction(tool, class string) adExtra {
 type adExtra struct {
 	Action
 	run func(Deps, context.Context, adIn) (map[string]any, error)
+	doc string // added to the tool description when the action shows
 }
 
 // accountStateDoc describes the ad-account-state actions that show, or is
@@ -484,8 +490,14 @@ func adReadTool(name, group, title, desc string, k adKind, extra ...adExtra) Too
 	}
 	return Tool{Name: name, Group: group, Actions: actions,
 		add: func(s *mcp.Server, d Deps, t Tool, visible []string) {
+			docs := ""
+			for _, x := range extra {
+				if x.doc != "" && slices.Contains(visible, x.Name) {
+					docs += x.doc
+				}
+			}
 			addActionTool(s, d, t, &mcp.Tool{Name: name, Title: title, Description: desc + "\n\n" + adSearchDoc + accountStateDoc(visible) + resetDoc(visible) +
-				createDoc(class, visible),
+				createDoc(class, visible) + docs,
 				Annotations: readOnly}, visible,
 				func(ctx context.Context, _ *mcp.CallToolRequest, in adIn) (*mcp.CallToolResult, map[string]any, error) {
 					for _, x := range extra {
@@ -517,7 +529,7 @@ func init() {
 				"(the DC that originated the last lockoutTime write, from replication metadata) and per_dc badPwdCount and "+
 				"badPasswordTime from every DC of the user's domain (they don't replicate; unreachable DCs in _skipped). "+
 				"The machine the bad passwords came from (event 4740) is not read."+counterpartDoc, adUsers,
-			adExtra{Action{Name: "resultant_policy", ADProbe: "pso-read"}, Deps.resultantPolicy}, adExtra{Action{Name: "lockout"}, Deps.lockout},
+			adExtra{Action: Action{Name: "resultant_policy", ADProbe: "pso-read"}, run: Deps.resultantPolicy}, adExtra{Action: Action{Name: "lockout"}, run: Deps.lockout},
 			accountState("ad_user", adUsers, "disable"), accountState("ad_user", adUsers, "enable"), accountState("ad_user", adUsers, "unlock"),
 			accountState("ad_user", adUsers, "must_change"), accountState("ad_user", adUsers, "set_expiry"), resetPassword,
 			createAction("ad_user", "user")),
