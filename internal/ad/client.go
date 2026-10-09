@@ -118,3 +118,67 @@ func ReadRootDSE(conn *ldap.Conn) (*RootDSE, error) {
 		DNSHostName:                e.GetAttributeValue("dnsHostName"),
 	}, nil
 }
+
+// Domain is one domain of the forest, from its crossRef.
+type Domain struct {
+	DNS     string `json:"dns"`
+	NetBIOS string `json:"netbios"`
+	DN      string `json:"dn"`
+}
+
+// ReadProbe checks one right the bind account may lack (for example
+// "pso-read"). It returns an error only when the right is missing; actions
+// that name it are then hidden.
+type ReadProbe func(conn *ldap.Conn, root *RootDSE) error
+
+// ReadProbes are the named read probes the startup probe runs. Tool issues
+// register theirs here.
+var ReadProbes = map[string]ReadProbe{}
+
+// Probe is what the startup probe learned. A nil *Probe (--no-probe) shows
+// everything, and so does a failed bind.
+type Probe struct {
+	Bound   bool              `json:"bound"`
+	DC      string            `json:"dc"`
+	Domains []Domain          `json:"domains,omitempty"`
+	Reads   map[string]string `json:"reads,omitempty"` // read probe name to "ok" or why it failed
+	Note    string            `json:"note,omitempty"`
+}
+
+// Probe binds, reads the rootDSE and the domain crossRefs, then runs every
+// ReadProbe.
+func (c *Client) Probe(ctx context.Context) *Probe {
+	p := &Probe{}
+	conn, dc, err := c.Dial(ctx)
+	p.DC = dc
+	if err != nil {
+		p.Note = err.Error()
+		return p
+	}
+	defer conn.Close()
+	p.Bound = true
+	root, err := ReadRootDSE(conn)
+	if err != nil {
+		p.Note = err.Error()
+		return p
+	}
+	// systemFlags bit 2 (FLAG_CR_NTDS_DOMAIN) marks a domain's crossRef.
+	res, err := conn.Search(ldap.NewSearchRequest("CN=Partitions,"+root.ConfigurationNamingContext, ldap.ScopeSingleLevel,
+		ldap.NeverDerefAliases, 0, 0, false, "(&(objectClass=crossRef)(systemFlags:1.2.840.113556.1.4.803:=2))",
+		[]string{"dnsRoot", "nETBIOSName", "nCName"}, nil))
+	if err != nil {
+		p.Note = "reading crossRefs: " + err.Error()
+	} else {
+		for _, e := range res.Entries {
+			p.Domains = append(p.Domains, Domain{e.GetAttributeValue("dnsRoot"), e.GetAttributeValue("nETBIOSName"), e.GetAttributeValue("nCName")})
+		}
+	}
+	p.Reads = map[string]string{}
+	for name, rp := range ReadProbes {
+		p.Reads[name] = "ok"
+		if err := rp(conn, root); err != nil {
+			p.Reads[name] = err.Error()
+		}
+	}
+	return p
+}

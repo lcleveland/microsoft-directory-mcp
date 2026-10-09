@@ -46,7 +46,10 @@ let
     cfg.logLevel
     "--request-timeout"
     cfg.requestTimeout
+    "--tool-groups"
+    (lib.concatStringsSep "," cfg.toolGroups)
   ]
+  ++ optional (!cfg.probe) "--no-probe"
   ++ optionals adOn (
     arg "ad-forest" cfg.ad.forest
     ++ arg "ad-bind-user" cfg.ad.bindUser
@@ -72,6 +75,8 @@ let
       "%d/entra-cert"
       "--entra-cloud"
       cfg.entra.cloud
+      "--entra-password-writeback"
+      cfg.entra.passwordWriteback
     ]
     ++ arg "entra-login-url" cfg.entra.loginUrl
     ++ arg "entra-graph-url" cfg.entra.graphUrl
@@ -144,6 +149,19 @@ in
         default = "global";
         description = "National cloud (`--entra-cloud`).";
       };
+      passwordWriteback = mkOption {
+        type = types.enum [
+          "on"
+          "off"
+          "unknown"
+        ];
+        default = "unknown";
+        description = ''
+          Whether password writeback is on, as you declare it (`--entra-password-writeback`).
+          entra_status reports it as operator-declared: app-only Graph cannot detect it.
+          Check Password reset > On-premises integration in the Entra admin center.
+        '';
+      };
       loginUrl = opt "entra-login-url" "Login base URL override, for tests";
       graphUrl = opt "entra-graph-url" "Graph base URL override, for tests";
     };
@@ -160,6 +178,33 @@ in
         description = "URL path of the MCP endpoint (`--path`).";
       };
       authTokenFile = opt "http-auth-token-file" "Runtime path to the bearer token HTTP clients must send, passed via systemd `LoadCredential`";
+    };
+
+    toolGroups = mkOption {
+      type = types.listOf (
+        types.enum [
+          "core"
+          "identity"
+          "security"
+          "policy"
+          "devices"
+          "infra"
+        ]
+      );
+      default = [
+        "core"
+        "identity"
+        "security"
+        "policy"
+        "devices"
+        "infra"
+      ];
+      description = "Tool groups to enable (`--tool-groups`). core is always on.";
+    };
+    probe = mkOption {
+      type = types.bool;
+      default = true;
+      description = "Run the startup probe that hides actions the server can't perform. false passes `--no-probe` and shows everything.";
     };
 
     requestTimeout = mkOption {

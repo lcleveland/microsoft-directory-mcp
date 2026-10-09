@@ -4,7 +4,9 @@
 #   samba-dc                 Samba AD DC, provisioned in preStart; LDAPS with
 #                            Samba's auto-generated CA
 #   stub-graph               stdlib Python Graph: v2.0 token endpoint that
-#                            verifies the client assertion, and /organization
+#                            verifies the client assertion and issues a JWT
+#                            with a roles claim; /organization, and the probe's
+#                            subscribedSkus (no P1), managedDevices and signIns (403)
 #   microsoft-directory-mcp  the module's HTTP service
 #
 # One full MCP session calls ad_status (a simple bind over LDAPS, trusting
@@ -28,6 +30,9 @@ let
   smbConf = "/var/lib/samba-dc/etc/smb.conf";
   # The certificate half of the Entra fixture, readable by the stub.
   certPublic = "/run/entra-cert-public.pem";
+  # An unsigned JWT the server decodes for the startup probe. Payload:
+  # {"aud":"https://graph.microsoft.com","roles":["Organization.Read.All","User.Read.All","LicenseAssignment.Read.All"]}
+  accessToken = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJhdWQiOiJodHRwczovL2dyYXBoLm1pY3Jvc29mdC5jb20iLCJyb2xlcyI6WyJPcmdhbml6YXRpb24uUmVhZC5BbGwiLCJVc2VyLlJlYWQuQWxsIiwiTGljZW5zZUFzc2lnbm1lbnQuUmVhZC5BbGwiXX0.stub";
 
   # Routes are (method, path) -> handler; later issues add to ROUTES and SEED.
   stub = pkgs.writers.writePython3Bin "stub-graph" { flakeIgnore = [ "E501" ]; } ''
@@ -49,7 +54,7 @@ let
     OPENSSL = "${lib.getExe pkgs.openssl}"
     TOKEN_PATH = "/" + TENANT + "/oauth2/v2.0/token"
     TOKEN_URL = "http://127.0.0.1:%d%s" % (PORT, TOKEN_PATH)
-    ACCESS_TOKEN = "issued-graph-access-token"
+    ACCESS_TOKEN = ${builtins.toJSON accessToken}
 
     SEED = {
         "organization": [{
@@ -58,6 +63,17 @@ let
             "onPremisesSyncEnabled": True,
             "onPremisesLastSyncDateTime": "2026-01-01T00:00:00Z",
         }],
+        # Exchange only: no P1 (AAD_PREMIUM) and no P2.
+        "subscribedSkus": [{
+            "skuPartNumber": "EXCHANGESTANDARD",
+            "capabilityStatus": "Enabled",
+            "servicePlans": [{
+                "servicePlanId": "9aaf7827-d63c-4b61-89c3-182f06f82e5c",
+                "servicePlanName": "EXCHANGE_S_STANDARD",
+                "provisioningStatus": "Success",
+            }],
+        }],
+        "managedDevices": [],
     }
 
 
@@ -122,9 +138,21 @@ let
         h.reply(200, {"value": SEED["organization"]})
 
 
+    def listing(name):
+        return lambda h, query: h.reply(200, {"value": SEED[name]})
+
+
+    def no_premium(h, query):
+        h.error(403, "Authentication_RequestFromNonPremiumTenantOrB2CTenant",
+                "Neither tenant is B2C or tenant doesn't have premium license")
+
+
     ROUTES = {
         ("POST", TOKEN_PATH): token,
         ("GET", "/v1.0/organization"): organization,
+        ("GET", "/v1.0/subscribedSkus"): listing("subscribedSkus"),
+        ("GET", "/v1.0/deviceManagement/managedDevices"): listing("managedDevices"),
+        ("GET", "/v1.0/auditLogs/signIns"): no_premium,
     }
     UNAUTHENTICATED = {TOKEN_PATH}
 
@@ -226,6 +254,17 @@ let
     assert entra["authenticated"] and entra["cloud"] == "global", entra
     assert entra["on_premises_sync_enabled"] is True, entra
     assert entra["on_premises_last_sync"] == "2026-01-01T00:00:00Z", entra
+
+    # The startup probe: the roles claim decoded, P1 absent from subscribedSkus,
+    # Intune present from its read probe. Later issues assert their hidden actions.
+    probe = entra["probe"]
+    assert probe["roles"] == ["Organization.Read.All", "User.Read.All", "LicenseAssignment.Read.All"], probe
+    assert probe["licences"] == {"P1": "absent", "P2": "absent", "Intune": "present"}, probe
+    assert "group_reads" not in probe and "notes" not in probe, probe
+    assert entra["enabled_groups"] == ["core", "identity", "security", "policy", "devices", "infra"], entra
+    assert entra["password_writeback"] == {"value": "unknown", "source": "operator-declared"}, entra
+    assert ad["probe"]["bound"], ad
+    assert {"dns": "corp.example.com", "netbios": "CORP", "dn": "DC=corp,DC=example,DC=com"} in ad["probe"]["domains"], ad
     print("ok")
   '';
 
@@ -373,7 +412,7 @@ pkgs.testers.runNixOSTest {
     with subtest("the stub verified the client assertion and saw the issued bearer"):
         machine.succeed("grep -qxF ${clientId} /tmp/stub-verified")
         machine.fail("test -e /tmp/stub-rejected")
-        machine.succeed("grep -qxF 'Bearer issued-graph-access-token' /tmp/stub-bearers")
+        machine.succeed("grep -qxF 'Bearer ${accessToken}' /tmp/stub-bearers")
 
     with subtest("/healthz answers without the bearer"):
         machine.succeed("curl -fsS http://127.0.0.1:${toString mcpPort}/healthz")
@@ -388,7 +427,7 @@ pkgs.testers.runNixOSTest {
         machine.fail(f"tr '\\0' '\\n' < /proc/{pid}/cmdline | grep -qF '${bindPass}'")
         journal = machine.succeed("journalctl -o cat --no-pager -u microsoft-directory-mcp.service")
         assert "starting" in journal, journal
-        for secret in ("${bindPass}", "${httpToken}", "issued-graph-access-token"):
+        for secret in ("${bindPass}", "${httpToken}", "${accessToken}"):
             assert secret not in journal, f"{secret} leaked into the journal"
   '';
 }

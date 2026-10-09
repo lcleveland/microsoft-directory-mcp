@@ -62,6 +62,17 @@ func run(args []string) error {
 			return err
 		}
 	}
+	// The tool list is fixed at startup, so the probe runs once, before it.
+	if !cfg.NoProbe {
+		if d.AD != nil {
+			d.ADProbe = d.AD.Probe(ctx)
+			log.Info("AD probe", "bound", d.ADProbe.Bound, "domains", len(d.ADProbe.Domains), "reads", d.ADProbe.Reads, "note", d.ADProbe.Note)
+		}
+		if d.Graph != nil {
+			d.EntraProbe = d.Graph.Probe(ctx)
+			log.Info("Entra probe", "roles", len(d.EntraProbe.Roles), "licences", d.EntraProbe.Licences, "notes", d.EntraProbe.Notes)
+		}
+	}
 	s := server.New(d, log)
 	if cfg.HTTP {
 		ln, err := net.Listen("tcp", cfg.Addr)
