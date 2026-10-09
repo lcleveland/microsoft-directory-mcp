@@ -172,6 +172,35 @@ func TestUserGetSelectsFieldSets(t *testing.T) {
 	}
 }
 
+// Group and device gets select the brief plus their curated sets; a
+// device get expands its registered owners.
+func TestGroupAndDeviceGetSelectFieldSets(t *testing.T) {
+	const id = "00000000-0000-0000-0000-000000000001"
+	for _, tc := range []struct {
+		tool, path, expand string
+		want               []string
+	}{
+		{"entra_group", "/v1.0/groups/" + id, "", append(slices.Clone(entraGroups.brief), "description", "membershipRule", "isAssignableToRole", "onPremisesSecurityIdentifier")},
+		{"entra_device", "/v1.0/devices/" + id, "registeredOwners($select=" + strings.Join(entraUsers.brief, ",") + ")",
+			append(slices.Clone(entraDevices.brief), "operatingSystemVersion", "isCompliant", "isManaged", "onPremisesSyncEnabled", "onPremisesSecurityIdentifier")},
+	} {
+		cs, seen := entraSession(t, nil, func(*http.Request) string { return `{"id":"` + id + `"}` })
+		if out, isErr := call(t, cs, tc.tool, map[string]any{"action": "get", "id": id}); isErr {
+			t.Fatalf("%s get: %v", tc.tool, out)
+		}
+		r := seen()[0]
+		if r.URL.Path != tc.path || r.URL.Query().Get("$expand") != tc.expand {
+			t.Errorf("%s: request %s", tc.tool, r.URL)
+		}
+		sel := strings.Split(r.URL.Query().Get("$select"), ",")
+		slices.Sort(sel)
+		slices.Sort(tc.want)
+		if !slices.Equal(sel, tc.want) {
+			t.Errorf("%s: $select %v, want %v", tc.tool, sel, tc.want)
+		}
+	}
+}
+
 func TestUserIDChecked(t *testing.T) {
 	cs, seen := entraSession(t, nil, func(*http.Request) string { return `{}` })
 	for _, id := range []string{"", "..", "ada", "00000000-0000-0000-0000-00000000000g"} {

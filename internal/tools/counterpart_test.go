@@ -135,6 +135,23 @@ func TestNoCounterpartWithOneSide(t *testing.T) {
 	}
 }
 
+// With only the AD side configured, an AD get carries no counterpart and
+// never tries the join.
+func TestNoCounterpartADOnly(t *testing.T) {
+	a, err := ad.New(&config.AD{TLS: "ldaps", DCs: []string{"127.0.0.1:1"}}, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]any{"objectSid": testSID}
+	Deps{Config: &config.Config{}, AD: a}.addCounterpart(out, func() (*Counterpart, error) {
+		t.Error("joined with no Entra side")
+		return nil, nil
+	})
+	if _, ok := out["counterpart"]; ok {
+		t.Errorf("%v", out)
+	}
+}
+
 // With both sides, an Entra get carries the block; a failed join is said
 // in it rather than failing the get.
 func TestEntraGetCarriesCounterpart(t *testing.T) {
