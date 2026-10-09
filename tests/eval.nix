@@ -243,6 +243,19 @@ in
     touch $out
   '';
 
+  # Every flag in the binary's --help must appear in the README.
+  readme-flags = pkgs.runCommand "microsoft-directory-mcp-readme-flags" { } ''
+    help=$(${
+      lib.getExe self.packages.${pkgs.stdenv.hostPlatform.system}.microsoft-directory-mcp
+    } --help 2>&1 || true)
+    flags=$(echo "$help" | grep -oE '^  -[a-z-]+' | sed 's/^  -/--/')
+    [ -n "$flags" ] || { echo "no flags parsed from --help:"; echo "$help"; exit 1; }
+    for f in $flags; do
+      grep -qF -- "\`$f\`" ${self}/README.md || { echo "README.md does not document $f"; exit 1; }
+    done
+    touch $out
+  '';
+
   module-insecure-warn = warns "insecure-warn" {
     ad.insecureSkipVerify = true;
   } "ad.insecureSkipVerify is true";
