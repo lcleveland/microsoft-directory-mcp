@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 
@@ -115,16 +116,20 @@ func classifyEntra(method, path string, props []string, raw bool) ([]entraOp, er
 	return ops, nil
 }
 
-// entraWrite is one Entra write: an object of kind, by id, and the call
-// made on it (rel under the object, body for the request).
+// entraWrite is one Entra write: an object of kind, by id, and the calls
+// made on it (method on each of rels under the object, with body).
 type entraWrite struct {
 	tool, action string
 	kind         entraKind
 	id           string
 	in           writeIn
 	raw          bool
-	method, rel  string
+	confirm      bool // in.Confirm must be the target's userPrincipalName
+	method       string
+	rels         []string // none: the object itself
 	body         map[string]any
+	check        func(context.Context) error // more refusals, after the target's
+	reply        any                         // decodes the last call's reply
 }
 
 // entraWrite runs w through the Entra rails. Every Entra write goes through
@@ -136,19 +141,30 @@ func (d Deps) entraWrite(ctx context.Context, w entraWrite) (map[string]any, err
 	if reason == "" {
 		return nil, errReason
 	}
-	path, err := w.kind.objectPath(w.id)
+	base, err := w.kind.objectPath(w.id)
 	if err != nil {
 		return nil, err
 	}
-	path += w.rel
-	endpoint := w.method + " " + path
+	rels := w.rels
+	if len(rels) == 0 {
+		rels = []string{""}
+	}
+	var paths []string
+	for _, rel := range rels {
+		paths = append(paths, base+rel)
+	}
+	endpoint := w.method + " " + strings.Join(paths, ", ")
 	audit := []any{"tool", w.tool, "action", w.action, "target", w.id, "endpoint", endpoint, "reason", reason}
 	sent := false
 	out, err := func() (map[string]any, error) {
 		props := slices.Sorted(maps.Keys(w.body))
-		ops, err := classifyEntra(w.method, strings.TrimPrefix(path, "/v1.0/"), props, w.raw)
-		if err != nil {
-			return nil, err
+		var ops []entraOp
+		for _, path := range paths {
+			o, err := classifyEntra(w.method, strings.TrimPrefix(path, "/v1.0/"), props, w.raw)
+			if err != nil {
+				return nil, err
+			}
+			ops = append(ops, o...)
 		}
 		var caps []string
 		for _, o := range ops {
@@ -168,8 +184,12 @@ func (d Deps) entraWrite(ctx context.Context, w entraWrite) (map[string]any, err
 			fields = append(fields, "isAssignableToRole")
 		}
 		var tgt map[string]any
-		if err := d.Graph.Object(ctx, strings.TrimSuffix(path, w.rel), graph.Params{Fields: fields}, &tgt); err != nil {
+		if err := d.Graph.Object(ctx, base, graph.Params{Fields: fields}, &tgt); err != nil {
 			return nil, err
+		}
+		upn, _ := tgt["userPrincipalName"].(string)
+		if w.confirm && !strings.EqualFold(strings.TrimSpace(w.in.Confirm), upn) {
+			return nil, fmt.Errorf("confirm must be the target's userPrincipalName: %v is %q. Check it is the user you mean, then retry", tgt["id"], upn)
 		}
 		if err := d.entraProtected(ctx, w.kind, tgt); err != nil {
 			return nil, err
@@ -177,16 +197,30 @@ func (d Deps) entraWrite(ctx context.Context, w entraWrite) (map[string]any, err
 		if err := d.entraAuthority(ctx, w.kind, tgt, ops); err != nil {
 			return nil, err
 		}
+		if w.check != nil {
+			if err := w.check(ctx); err != nil {
+				return nil, err
+			}
+		}
 		d.log().Info("entra write", append(audit, "outcome", "sending")...)
 		sent = true
 		var body any // a nil map would send null
 		if w.body != nil {
 			body = w.body
 		}
-		if err := d.Graph.Do(ctx, w.method, path, body, nil); err != nil {
-			return nil, onPremMastered(err)
+		for i, path := range paths {
+			err := d.Graph.Do(ctx, w.method, path, body, w.reply)
+			var ae *graph.APIError
+			if w.method == http.MethodDelete && strings.HasSuffix(path, "/$ref") && errors.As(err, &ae) && ae.Status == http.StatusNotFound {
+				continue // the reference is already gone
+			}
+			if err != nil && i > 0 {
+				err = fmt.Errorf("%d of %d calls made (%s), then: %w", i, len(paths), strings.Join(rels[:i], ", "), err)
+			}
+			if err != nil {
+				return nil, onPremMastered(err)
+			}
 		}
-		upn, _ := tgt["userPrincipalName"].(string)
 		name, _ := tgt["displayName"].(string)
 		return map[string]any{"id": tgt["id"], "name": cmp.Or(upn, name), "action": w.action, "endpoint": endpoint}, nil
 	}()
@@ -203,7 +237,7 @@ func (d Deps) entraWrite(ctx context.Context, w entraWrite) (map[string]any, err
 }
 
 // entraProtected refuses a protected target: a role-assignable group, or a
-// user holding a directory role (any role, any scope), in a role-assignable
+// user or service principal holding a directory role (any role, any scope), in a role-assignable
 // group or owning one. A Graph error fails closed.
 // ponytail: active assignments only; a PIM-eligible holder passes until it
 // activates, and Graph refuses writes on it to a User Administrator.
@@ -215,7 +249,7 @@ func (d Deps) entraProtected(ctx context.Context, k entraKind, tgt map[string]an
 	if tgt["isAssignableToRole"] == true {
 		return refuse("is a role-assignable group")
 	}
-	if k.path != entraUsers.path {
+	if k.path != entraUsers.path && k.path != entraSPs.path {
 		return nil
 	}
 	p, err := d.Graph.List(ctx, "/v1.0/roleManagement/directory/roleAssignments", graph.Params{
@@ -251,10 +285,12 @@ func (d Deps) entraProtected(ctx context.Context, k entraKind, tgt map[string]an
 }
 
 // entraAuthority refuses ops on a target synced from the forest when one
-// of them is made in AD instead, naming the AD counterpart and action. A
-// Graph or AD error fails closed.
+// of them is made in AD instead, naming the AD counterpart and action; a
+// password reset is made in Entra when the operator declares writeback on.
+// A Graph or AD error fails closed.
 func (d Deps) entraAuthority(ctx context.Context, k entraKind, tgt map[string]any, ops []entraOp) error {
-	i := slices.IndexFunc(ops, func(o entraOp) bool { return o.synced != "" })
+	writeback := d.Config.Entra != nil && d.Config.Entra.PasswordWriteback == "on"
+	i := slices.IndexFunc(ops, func(o entraOp) bool { return o.synced != "" && !(writeback && o.prop == "passwordProfile") })
 	joins := []join{joinUser, joinGroup, joinDevice}
 	j := slices.IndexFunc(joins, func(j join) bool { return j.entra.path == k.path })
 	if i < 0 || j < 0 {
@@ -267,7 +303,11 @@ func (d Deps) entraAuthority(ctx context.Context, k entraKind, tgt map[string]an
 	if c.SourceOfAuthority != "forest" {
 		return nil
 	}
-	return fmt.Errorf("%v is synced from the forest (%s says so): call %s on %s instead", tgt["id"], c.Source, ops[i].synced, cmp.Or(c.ID, "its AD counterpart"))
+	err = fmt.Errorf("%v is synced from the forest (%s says so): call %s on %s instead", tgt["id"], c.Source, ops[i].synced, cmp.Or(c.ID, "its AD counterpart"))
+	if ops[i].prop == "passwordProfile" {
+		err = fmt.Errorf("%w; Entra resets a synced user's password only when the operator declares password writeback on (--entra-password-writeback)", err)
+	}
+	return err
 }
 
 // onPremMastered turns Graph's refusal of a write to a synced object, one
@@ -288,7 +328,7 @@ func entraAccountState(action string) entraAction {
 	case "disable", "enable":
 		w.body = map[string]any{"accountEnabled": action == "enable"}
 	case "revoke_sessions":
-		w.method, w.rel = http.MethodPost, "/revokeSignInSessions"
+		w.method, w.rels = http.MethodPost, []string{"/revokeSignInSessions"}
 		perms = []string{"User.RevokeSessions.All", "User.ReadWrite.All", "Directory.ReadWrite.All"}
 	}
 	return entraAction{Action{Name: action, Perms: perms, Capabilities: []string{"entra-account-state"}},
@@ -299,22 +339,180 @@ func entraAccountState(action string) entraAction {
 		}}
 }
 
-// entraAccountStateDoc describes the entra-account-state actions that
-// show, or is "" when none does.
-func entraAccountStateDoc(visible []string) string {
+// entraResetPassword is entra_user reset_password (entra-credentials): a
+// generated password set through passwordProfile, must-change unless
+// turned off, with confirm. The reply is the one place it appears.
+// ponytail: the password avoids only a UPN id's name, not the displayName;
+// a synced user's AD complexity check may refuse one in about a thousand.
+// ponytail: with writeback declared on, a synced user's reset is this same
+// app-only PATCH; docs/research/hybrid-sync.md §5 documents writeback for
+// the delegated resetPassword. If Graph refuses it as on-premises mastered,
+// onPremMastered says so; move to resetPassword once delegated auth exists.
+var entraResetPassword = entraAction{Action{Name: "reset_password", Capabilities: []string{"entra-credentials"},
+	Perms: []string{"User-PasswordProfile.ReadWrite.All", "User.ReadWrite.All", "Directory.ReadWrite.All"}},
+	func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
+		must := in.MustChange == nil || *in.MustChange
+		name, _, _ := strings.Cut(in.ID, "@")
+		pw := newPassword(0, name)
+		out, err := d.entraWrite(ctx, entraWrite{tool: "entra_user", action: "reset_password", kind: entraUsers, id: in.ID, in: in.writeIn,
+			confirm: true, method: http.MethodPatch,
+			body: map[string]any{"passwordProfile": map[string]any{"password": string(pw), "forceChangePasswordNextSignIn": must}}})
+		if err != nil {
+			return nil, err
+		}
+		out["password"], out["must_change"] = string(pw), must
+		return out, nil
+	}}
+
+// entraIssueTAP is entra_user issue_tap (entra-credentials): a Temporary
+// Access Pass with the tenant policy's defaults. The reply is the one
+// place it appears.
+var entraIssueTAP = entraAction{Action{Name: "issue_tap", Capabilities: []string{"entra-credentials"},
+	Perms: []string{"UserAuthMethod-TAP.ReadWrite.All", "UserAuthenticationMethod.ReadWrite.All"}},
+	func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
+		var tap map[string]any
+		out, err := d.entraWrite(ctx, entraWrite{tool: "entra_user", action: "issue_tap", kind: entraUsers, id: in.ID, in: in.writeIn,
+			method: http.MethodPost, rels: []string{"/authentication/temporaryAccessPassMethods"}, body: map[string]any{}, reply: &tap})
+		if err != nil {
+			return nil, err
+		}
+		out["temporary_access_pass"] = tap
+		return out, nil
+	}}
+
+// entraDeleteAuthMethod is entra_user delete_auth_method
+// (entra-credentials): one of the user's authentication methods, by id,
+// deleted from the collection of its type.
+var entraDeleteAuthMethod = entraAction{Action{Name: "delete_auth_method", Capabilities: []string{"entra-credentials"},
+	Perms: []string{"UserAuthenticationMethod.ReadWrite.All"}},
+	func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
+		// The reason first, as in entraWrite: no read for a write that can't be made.
+		if strings.TrimSpace(in.Reason) == "" {
+			return nil, errReason
+		}
+		// Not only GUIDs: FIDO2 and Windows Hello ids are base64url.
+		if in.MethodID == "" || strings.ContainsAny(in.MethodID, "/?#%\\") {
+			return nil, fmt.Errorf("method_id %q: want an authentication method id from auth_methods", in.MethodID)
+		}
+		path, err := entraUsers.objectPath(in.ID)
+		if err != nil {
+			return nil, err
+		}
+		var m map[string]any
+		if err := d.Graph.Object(ctx, path+"/authentication/methods/"+url.PathEscape(in.MethodID), graph.Params{}, &m); err != nil {
+			return nil, err
+		}
+		// #microsoft.graph.fido2AuthenticationMethod is in fido2Methods, and so on.
+		typ, _ := m["@odata.type"].(string)
+		kind, ok := strings.CutSuffix(strings.TrimPrefix(typ, "#microsoft.graph."), "AuthenticationMethod")
+		if !ok || kind == "" || kind == "password" {
+			return nil, fmt.Errorf("method %s has type %q, not an authentication method this server deletes (a password is reset, not deleted)", in.MethodID, typ)
+		}
+		out, err := d.entraWrite(ctx, entraWrite{tool: "entra_user", action: "delete_auth_method", kind: entraUsers, id: in.ID, in: in.writeIn,
+			method: http.MethodDelete, rels: []string{"/authentication/" + kind + "Methods/" + url.PathEscape(in.MethodID)}})
+		if err != nil {
+			return nil, err
+		}
+		out["method"] = map[string]any{"id": in.MethodID, "@odata.type": typ}
+		return out, nil
+	}}
+
+// entraMembership is entra_group add_members (one members@odata.bind
+// PATCH) or remove_members (one $ref delete each; one already out is
+// done), entra-group-membership. A protected member is refused, as a
+// protected group is.
+func entraMembership(action string) entraAction {
+	return entraAction{Action{Name: action, Capabilities: []string{"entra-group-membership"},
+		Perms: []string{"GroupMember.ReadWrite.All", "Group.ReadWrite.All", "Directory.ReadWrite.All"}},
+		func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
+			if n := len(in.Members); n == 0 || n > maxMembers {
+				return nil, fmt.Errorf("%s takes 1 to %d members, got %d: call again for more", action, maxMembers, n)
+			}
+			ids := slices.Compact(slices.Sorted(slices.Values(in.Members)))
+			for _, id := range ids {
+				if !objectID.MatchString(id) {
+					return nil, fmt.Errorf("member %q: want an object id (GUID)", id)
+				}
+			}
+			w := entraWrite{tool: "entra_group", action: action, kind: entraGroups, id: in.ID, in: in.writeIn,
+				check: func(ctx context.Context) error {
+					for _, id := range ids {
+						var m map[string]any
+						if err := d.Graph.Object(ctx, "/v1.0/directoryObjects/"+id, graph.Params{}, &m); err != nil {
+							return fmt.Errorf("member %s: %w", id, err)
+						}
+						k := entraKind{}
+						for _, x := range []entraKind{entraUsers, entraSPs} {
+							if m["@odata.type"] == x.typ {
+								k = x
+							}
+						}
+						if err := d.entraProtected(ctx, k, m); err != nil {
+							return fmt.Errorf("member %w", err)
+						}
+					}
+					return nil
+				}}
+			if action == "add_members" {
+				var refs []string
+				for _, id := range ids {
+					refs = append(refs, d.Graph.URL("/v1.0/directoryObjects/"+id))
+				}
+				w.method, w.body = http.MethodPatch, map[string]any{"members@odata.bind": refs}
+			} else {
+				w.method = http.MethodDelete
+				for _, id := range ids {
+					w.rels = append(w.rels, "/members/"+id+"/$ref")
+				}
+			}
+			out, err := d.entraWrite(ctx, w)
+			if err != nil {
+				return nil, err
+			}
+			out["members"] = ids
+			return out, nil
+		}}
+}
+
+// entraGroupDoc describes the entra-group-membership actions that show,
+// or is "" when none does.
+func entraGroupDoc(visible []string) string {
+	if !slices.Contains(visible, "add_members") {
+		return ""
+	}
+	return "\n\nWrites (the entra-group-membership capability), one group by object id, with a reason for the audit log: " +
+		"add_members and remove_members take members, 1 to 20 object ids (users, groups, devices). An add is one call: if any " +
+		"member is already in, Graph refuses it whole. A remove of one already out is no error. Role-assignable groups and protected members (directory role holders, members and owners of " +
+		"role-assignable groups) are refused; a group synced from the forest is refused and names the ad_group action and AD counterpart."
+}
+
+// entraUserDoc describes the entra_user writes that show, or is "" when
+// none does.
+func entraUserDoc(visible []string) string {
 	var says []string
 	if slices.Contains(visible, "disable") {
-		says = append(says, "disable and enable set accountEnabled")
+		says = append(says, "disable and enable set accountEnabled (entra-account-state)")
 	}
 	if slices.Contains(visible, "revoke_sessions") {
-		says = append(says, "revoke_sessions invalidates the user's refresh tokens and session cookies (revokeSignInSessions)")
+		says = append(says, "revoke_sessions invalidates the user's refresh tokens and session cookies (revokeSignInSessions, entra-account-state)")
+	}
+	if slices.Contains(visible, "reset_password") {
+		says = append(says, "reset_password sets a password the server generates, returned once in the reply and never logged, "+
+			"which the user must change at next sign-in unless must_change is false; confirm must be the user's userPrincipalName (entra-credentials)")
+	}
+	if slices.Contains(visible, "issue_tap") {
+		says = append(says, "issue_tap issues a Temporary Access Pass with the tenant policy's lifetime, returned once in the reply and never logged (entra-credentials)")
+	}
+	if slices.Contains(visible, "delete_auth_method") {
+		says = append(says, "delete_auth_method deletes one authentication method by method_id, from auth_methods (entra-credentials)")
 	}
 	if len(says) == 0 {
 		return ""
 	}
-	return "\n\nWrites (the entra-account-state capability), one user by id, with a reason for the audit log: " + strings.Join(says, "; ") +
+	return "\n\nWrites, one user by id, with a reason for the audit log: " + strings.Join(says, "; ") +
 		". Protected targets (directory role holders, members and owners of role-assignable groups) are refused. On a user synced " +
-		"from the forest, disable and enable are refused and name the ad_user action and AD counterpart; revoke_sessions is allowed."
+		"from the forest, disable and enable are refused and name the ad_user action and AD counterpart, and so is reset_password " +
+		"unless the operator declares password writeback on; the rest are allowed."
 }
 
 // entraCapabilities are the Entra side's capabilities.

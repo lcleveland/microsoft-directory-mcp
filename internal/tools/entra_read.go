@@ -93,6 +93,11 @@ type entraIn struct {
 	Cursor string   `json:"cursor,omitempty" jsonschema:"next_cursor from the previous call with the same arguments, unchanged"`
 	// Only on entra_group.
 	Transitive bool `json:"transitive,omitempty" jsonschema:"entra_group members: every nested member, not only direct ones"`
+	// Only on entra_user.
+	MustChange *bool  `json:"must_change,omitempty" jsonschema:"writes, reset_password: make the user change the password at next sign-in; default true"`
+	MethodID   string `json:"method_id,omitempty" jsonschema:"writes, delete_auth_method: the id of the authentication method, from auth_methods"`
+	// Only on entra_group.
+	Members []string `json:"members,omitempty" jsonschema:"writes, add_members, remove_members: up to 20 members by object id (a GUID)"`
 	// Only on entra_app.
 	Days int `json:"days,omitempty" jsonschema:"entra_app expiring_credentials: the window in days from now (default 30)"`
 	writeIn
@@ -375,7 +380,7 @@ func init() {
 				"is a direct member of. devices: the devices the user owns or registered, each with relation. licenses: "+
 				"assignedLicenses and licenseAssignmentStates (direct or group-inherited, errors), with skuPartNumber. "+
 				"auth_methods: the user's registered authentication methods. registration: the user's MFA and SSPR "+
-				"registration details (P1)."+counterpartDoc, entraAccountStateDoc,
+				"registration details (P1)."+counterpartDoc, entraUserDoc,
 			entraAction{Action{Name: "search", Perms: userRead}, entraSearch(entraUsers)},
 			entraAction{Action{Name: "get", Perms: userRead}, Deps.userGet},
 			entraAction{Action{Name: "member_of", Perms: groupRead}, related(entraUsers, "/memberOf", directoryObjects)},
@@ -390,13 +395,14 @@ func init() {
 			entraAction{Action{Name: "auth_methods", Perms: []string{"UserAuthenticationMethod.Read.All"}}, related(entraUsers, "/authentication/methods", nil)},
 			entraAction{Action{Name: "registration", Perms: []string{"AuditLog.Read.All"}, Licence: "P1"}, Deps.registration},
 			entraAccountState("disable"), entraAccountState("enable"), entraAccountState("revoke_sessions"),
+			entraResetPassword, entraIssueTAP, entraDeleteAuthMethod,
 		),
 		entraTool("entra_group", "identity", "Entra ID groups",
 			"Groups of the tenant. search: list groups as briefs (id, displayName, mail, securityEnabled, mailEnabled, "+
 				"groupTypes, onPremisesSyncEnabled). get: one group by object id, with description, membershipRule, "+
 				"isAssignableToRole, memberCount and ownerCount, but not its members. members: the group's members as "+
 				"briefs of their own kind (@odata.type says which); transitive=true lists every nested member instead. "+
-				"owners: the group's owners."+counterpartDoc, nil,
+				"owners: the group's owners."+counterpartDoc, entraGroupDoc,
 			entraAction{Action{Name: "search", Perms: groupRead}, entraSearch(entraGroups)},
 			entraAction{Action{Name: "get", Perms: groupRead}, Deps.groupGet},
 			entraAction{Action{Name: "members", Perms: groupRead}, func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
@@ -407,6 +413,7 @@ func init() {
 				return d.entraList(ctx, entraGroups, rel, in, directoryObjects)
 			}},
 			entraAction{Action{Name: "owners", Perms: groupRead}, related(entraGroups, "/owners", directoryObjects)},
+			entraMembership("add_members"), entraMembership("remove_members"),
 		),
 		entraTool("entra_device", "devices", "Entra ID and Intune devices",
 			"Devices of the tenant. search: list Entra devices as briefs (id, deviceId, displayName, operatingSystem, "+

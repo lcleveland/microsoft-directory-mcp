@@ -9,6 +9,7 @@ import (
 	"path"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/lcleveland/microsoft-directory-mcp/internal/config"
@@ -78,8 +79,19 @@ const (
 	u6 = "00000000-0000-0000-0000-000000000006"
 )
 
-// entraWriteStub answers the pre-reads of the users above and their
-// memberships and ownerships, and every write with write.
+// Groups the stub knows: g1 cloud-only, g2 synced, g3 role-assignable; m1
+// an authentication method of every user.
+const (
+	g1 = "00000000-0000-0000-0000-0000000000a1"
+	g2 = "00000000-0000-0000-0000-0000000000a2"
+	g3 = "00000000-0000-0000-0000-0000000000a3"
+	m1 = "00000000-0000-0000-0000-0000000000b1"
+	// sp1 is a service principal holding a directory role.
+	sp1 = "00000000-0000-0000-0000-0000000000c1"
+)
+
+// entraWriteStub answers the pre-reads of the users and groups above, the
+// users' memberships and ownerships, and every write with write.
 func entraWriteStub(write string) func(*http.Request) string {
 	return func(r *http.Request) string {
 		p := r.URL.Path
@@ -89,7 +101,7 @@ func entraWriteStub(write string) func(*http.Request) string {
 			return write
 		case strings.HasSuffix(p, "/onPremisesSyncBehavior"):
 			return "403"
-		case strings.HasSuffix(p, "/roleAssignments") && strings.Contains(r.URL.Query().Get("$filter"), u6):
+		case strings.HasSuffix(p, "/roleAssignments") && (strings.Contains(r.URL.Query().Get("$filter"), u6) || strings.Contains(r.URL.Query().Get("$filter"), sp1)):
 			return `{"value":[{"roleDefinitionId":"00000000-0000-0000-0000-0000000000d1","directoryScopeId":"/administrativeUnits/au1"}]}`
 		case strings.HasSuffix(p, "/roleAssignments"):
 			return `{"value":[]}`
@@ -99,6 +111,16 @@ func entraWriteStub(write string) func(*http.Request) string {
 			return `{"value":[{"@odata.type":"#microsoft.graph.group","id":"g1","displayName":"tier0","isAssignableToRole":true}]}`
 		case strings.HasSuffix(p, "/transitiveMemberOf"), strings.HasSuffix(p, "/ownedObjects"):
 			return `{"value":[{"@odata.type":"#microsoft.graph.group","id":"g0","displayName":"staff","isAssignableToRole":false}]}`
+		case strings.HasSuffix(p, "/authentication/methods/"+m1):
+			return `{"@odata.type":"#microsoft.graph.phoneAuthenticationMethod","id":"` + m1 + `"}`
+		case strings.HasPrefix(p, "/v1.0/directoryObjects/") && path.Base(p) == sp1:
+			return `{"@odata.type":"#microsoft.graph.servicePrincipal","id":"` + sp1 + `"}`
+		case strings.HasPrefix(p, "/v1.0/directoryObjects/"):
+			return `{"@odata.type":"#microsoft.graph.user","id":"` + path.Base(p) + `"}`
+		case path.Base(p) == g2:
+			return `{"id":"` + g2 + `","displayName":"synced","onPremisesSyncEnabled":true,"onPremisesSecurityIdentifier":"S-1-5-21-1-2-3-1106"}`
+		case path.Base(p) == g3:
+			return `{"id":"` + g3 + `","displayName":"tier0","isAssignableToRole":true}`
 		case path.Base(p) == u2:
 			return `{"id":"` + u2 + `","userPrincipalName":"u2@example.com","onPremisesSyncEnabled":true,"onPremisesSecurityIdentifier":"S-1-5-21-1-2-3-1105"}`
 		}
@@ -266,5 +288,173 @@ func TestEntraAccountStateRegisters(t *testing.T) {
 	cs, _ = entraSession(t, &graph.Probe{Roles: []string{"User.Read.All", "User.RevokeSessions.All"}}, func(*http.Request) string { return `{}` }, "entra-account-state")
 	if got := listed(t, cs)["entra_user"]; !slices.Equal(got[len(got)-1:], []string{"revoke_sessions"}) || slices.Contains(got, "disable") {
 		t.Errorf("entra_user with only User.RevokeSessions.All: %v", got)
+	}
+}
+
+// entraBodies is d with its Graph stub keeping each write's body too.
+func entraBodies(t *testing.T, d Deps, write string) (Deps, func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	var bodies []string
+	d.Graph, _ = graphStub(t, func(r *http.Request) string {
+		if r.Method != http.MethodGet {
+			b, _ := io.ReadAll(r.Body)
+			mu.Lock()
+			bodies = append(bodies, r.Method+" "+r.URL.Path+" "+string(b))
+			mu.Unlock()
+		}
+		return entraWriteStub(write)(r)
+	})
+	return d, func() []string { mu.Lock(); defer mu.Unlock(); return slices.Clone(bodies) }
+}
+
+func entraCall(d Deps, a entraAction, in entraIn) (map[string]any, error) {
+	if in.Reason == "" {
+		in.Reason = "r"
+	}
+	return a.run(d, context.Background(), in)
+}
+
+// A reset sets the generated password, returned once and never logged,
+// must-change by default; confirm names the UPN. On a synced user it is
+// refused, and routed to AD, unless writeback is declared on.
+func TestEntraResetPassword(t *testing.T) {
+	d, buf, _ := entraWriteDeps(t, "", "entra-credentials")
+	d, bodies := entraBodies(t, d, "")
+	out, err := entraCall(d, entraResetPassword, entraIn{ID: u1, writeIn: writeIn{Confirm: "User@example.com"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pw, _ := out["password"].(string)
+	want := `PATCH /v1.0/users/` + u1 + ` {"passwordProfile":{"forceChangePasswordNextSignIn":true,"password":"` + pw + `"}}`
+	if len(pw) < 20 || out["must_change"] != true || !slices.Equal(bodies(), []string{want}) {
+		t.Errorf("reply %v, wrote %v", out, bodies())
+	}
+	if strings.Contains(buf.String(), pw) || !strings.Contains(buf.String(), "properties=[passwordProfile]") {
+		t.Errorf("audit log:\n%s", buf.String())
+	}
+	no := false
+	if _, err := entraCall(d, entraResetPassword, entraIn{ID: u1, MustChange: &no, writeIn: writeIn{Confirm: "user@example.com"}}); err != nil ||
+		!strings.Contains(bodies()[1], `"forceChangePasswordNextSignIn":false`) {
+		t.Errorf("must_change false: %v %v", err, bodies())
+	}
+
+	for _, tc := range []struct {
+		name, id, confirm, writeback, says string
+	}{
+		{"confirm mismatch", u1, "other@example.com", "", `confirm must be the target's userPrincipalName: ` + u1 + ` is "user@example.com"`},
+		{"synced", u2, "u2@example.com", "unknown", "call ad_user reset_password on its AD counterpart instead; Entra resets a synced user's password only when the operator declares password writeback on"},
+		{"synced, writeback off", u2, "u2@example.com", "off", "call ad_user reset_password"},
+		{"synced, writeback on", u2, "u2@example.com", "on", ""},
+	} {
+		d, _, writes := entraWriteDeps(t, "", "entra-credentials")
+		d.Config.Entra = &config.Entra{PasswordWriteback: tc.writeback}
+		_, err := entraCall(d, entraResetPassword, entraIn{ID: tc.id, writeIn: writeIn{Confirm: tc.confirm}})
+		if tc.says == "" && (err != nil || len(writes()) != 1) || tc.says != "" && (err == nil || !strings.Contains(err.Error(), tc.says) || len(writes()) != 0) {
+			t.Errorf("%s: %v, wrote %v", tc.name, err, writes())
+		}
+	}
+}
+
+// A TAP is in the reply and never in the log.
+func TestEntraIssueTAP(t *testing.T) {
+	d, buf, writes := entraWriteDeps(t, `{"id":"t1","temporaryAccessPass":"TAPsecret123","lifetimeInMinutes":60}`, "entra-credentials")
+	out, err := entraCall(d, entraIssueTAP, entraIn{ID: u2}) // allowed on a synced user
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tap, _ := out["temporary_access_pass"].(map[string]any); tap["temporaryAccessPass"] != "TAPsecret123" {
+		t.Errorf("reply %v", out)
+	}
+	if w := writes(); !slices.Equal(w, []string{"POST /v1.0/users/" + u2 + "/authentication/temporaryAccessPassMethods"}) {
+		t.Errorf("wrote %v", w)
+	}
+	if log := buf.String(); strings.Contains(log, "TAPsecret123") || !strings.Contains(log, "outcome=ok") {
+		t.Errorf("audit log:\n%s", log)
+	}
+}
+
+// An auth method is deleted from the collection of its type.
+func TestEntraDeleteAuthMethod(t *testing.T) {
+	d, _, writes := entraWriteDeps(t, "", "entra-credentials")
+	if _, err := entraCall(d, entraDeleteAuthMethod, entraIn{ID: u1, MethodID: m1}); err != nil {
+		t.Fatal(err)
+	}
+	if w := writes(); !slices.Equal(w, []string{"DELETE /v1.0/users/" + u1 + "/authentication/phoneMethods/" + m1}) {
+		t.Errorf("wrote %v", w)
+	}
+	if _, err := entraCall(d, entraDeleteAuthMethod, entraIn{ID: u1, MethodID: "a/b"}); err == nil || !strings.Contains(err.Error(), "want an authentication method id") {
+		t.Errorf("bad method id: %v", err)
+	}
+}
+
+// Members are added in one bind PATCH and removed one $ref each, one
+// already out being done; protected and synced groups and protected
+// members are refused before anything is sent.
+func TestEntraMembership(t *testing.T) {
+	d, _, _ := entraWriteDeps(t, "", "entra-group-membership")
+	d, bodies := entraBodies(t, d, "")
+	out, err := entraCall(d, entraMembership("add_members"), entraIn{ID: g1, Members: []string{u2, u1, u1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := d.Graph.URL("/v1.0/directoryObjects/")
+	if want := `PATCH /v1.0/groups/` + g1 + ` {"members@odata.bind":["` + ref + u1 + `","` + ref + u2 + `"]}`; !slices.Equal(bodies(), []string{want}) {
+		t.Errorf("wrote %v, want %s", bodies(), want)
+	}
+	if !slices.Equal(out["members"].([]string), []string{u1, u2}) {
+		t.Errorf("reply %v", out)
+	}
+	d, _, writes := entraWriteDeps(t, "404", "entra-group-membership")
+	if _, err := entraCall(d, entraMembership("remove_members"), entraIn{ID: g1, Members: []string{u1, u2}}); err != nil {
+		t.Fatal(err)
+	}
+	if w := writes(); !slices.Equal(w, []string{"DELETE /v1.0/groups/" + g1 + "/members/" + u1 + "/$ref", "DELETE /v1.0/groups/" + g1 + "/members/" + u2 + "/$ref"}) {
+		t.Errorf("wrote %v", w)
+	}
+
+	many := make([]string, 21)
+	for i := range many {
+		many[i] = u1
+	}
+	for _, tc := range []struct {
+		name, action, group string
+		members             []string
+		says                string
+	}{
+		{"role-assignable", "add_members", g3, []string{u1}, "protected target: it is a role-assignable group"},
+		{"synced", "remove_members", g2, []string{u1}, "synced from the forest (onPremisesSyncEnabled says so): call ad_group remove_members"},
+		{"protected member", "add_members", g1, []string{u1, u3}, "member " + u3 + " is a protected target: it holds the directory role Helpdesk Administrator"},
+		{"role-holding service principal", "add_members", g1, []string{sp1}, "member " + sp1 + " is a protected target: it holds the directory role"},
+		{"too many", "add_members", g1, many, "takes 1 to 20 members, got 21"},
+		{"none", "remove_members", g1, nil, "takes 1 to 20 members, got 0"},
+		{"not a GUID", "add_members", g1, []string{"user@example.com"}, "want an object id"},
+	} {
+		d, _, writes := entraWriteDeps(t, "", "entra-group-membership")
+		_, err := entraCall(d, entraMembership(tc.action), entraIn{ID: tc.group, Members: tc.members})
+		if err == nil || !strings.Contains(err.Error(), tc.says) || len(writes()) != 0 {
+			t.Errorf("%s: %v, wrote %v", tc.name, err, writes())
+		}
+	}
+}
+
+// With entra-credentials and entra-group-membership on, their actions and
+// parameters show.
+func TestEntraCredentialsRegister(t *testing.T) {
+	cs, _ := entraSession(t, nil, func(*http.Request) string { return `{}` }, "entra-credentials", "entra-group-membership")
+	got := listed(t, cs)
+	if want := []string{"reset_password", "issue_tap", "delete_auth_method"}; !slices.Equal(got["entra_user"][len(got["entra_user"])-3:], want) || slices.Contains(got["entra_user"], "disable") {
+		t.Errorf("entra_user: %v", got["entra_user"])
+	}
+	if want := []string{"search", "get", "members", "owners", "add_members", "remove_members"}; !slices.Equal(got["entra_group"], want) {
+		t.Errorf("entra_group: %v", got["entra_group"])
+	}
+	for _, want := range []string{"reason", "confirm", "must_change", "method_id"} {
+		if !slices.Contains(props(t, cs, "entra_user"), want) {
+			t.Errorf("entra_user lacks %s", want)
+		}
+	}
+	if p := props(t, cs, "entra_group"); !slices.Contains(p, "members") || !slices.Contains(p, "reason") || slices.Contains(p, "confirm") {
+		t.Errorf("entra_group: %v", p)
 	}
 }

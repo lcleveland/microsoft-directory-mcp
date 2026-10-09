@@ -208,6 +208,9 @@ func (c *Client) Get(ctx context.Context, path string, out any) error {
 	return c.Do(ctx, http.MethodGet, path, nil, out)
 }
 
+// URL is path's absolute URL, as an @odata.bind or @odata.id names it.
+func (c *Client) URL(path string) string { return c.graphURL + path }
+
 // Do sends method to path with body JSON-encoded (nil for none) and decodes
 // the reply into out (nil discards it).
 func (c *Client) Do(ctx context.Context, method, path string, body, out any) error {
@@ -218,7 +221,7 @@ func (c *Client) Do(ctx context.Context, method, path string, body, out any) err
 			return err
 		}
 	}
-	resp, err := c.send(ctx, method, c.graphURL+path, false, b)
+	resp, err := c.send(ctx, method, c.URL(path), false, b)
 	if err != nil || out == nil || len(resp) == 0 {
 		return err
 	}

@@ -15,7 +15,7 @@ import (
 )
 
 var (
-	entraSPs = entraKind{path: "/v1.0/servicePrincipals",
+	entraSPs = entraKind{path: "/v1.0/servicePrincipals", typ: "#microsoft.graph.servicePrincipal",
 		brief: []string{"id", "appId", "displayName", "servicePrincipalType", "accountEnabled", "appOwnerOrganizationId"},
 	}.curated("passwordCredentials", "keyCredentials", "appRoles")
 	entraApps = entraKind{path: "/v1.0/applications",

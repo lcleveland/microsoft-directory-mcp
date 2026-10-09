@@ -13,7 +13,7 @@
 #                            directory audit events (activityDisplayName filters);
 #                            a synced user whose SID is vmuser042's, read from
 #                            /var/lib/samba-dc/vm-synced-sid (onPremisesSyncBehavior refused: 403)
-#                            PATCH of a user's accountEnabled, empty role assignments,
+#                            PATCH of a user's accountEnabled or passwordProfile, empty role assignments,
 #                            memberships and ownerships; every write recorded in /tmp/stub-writes
 #   microsoft-directory-mcp  the module's HTTP service
 #
@@ -45,8 +45,8 @@ let
   # vmuser042's objectSid, written at provisioning for the stub's synced user.
   syncedSid = "/var/lib/samba-dc/vm-synced-sid";
   # An unsigned JWT the server decodes for the startup probe. Payload:
-  # {"aud":"https://graph.microsoft.com","roles":["Organization.Read.All","User.Read.All","LicenseAssignment.Read.All","GroupMember.Read.All","Device.Read.All","Application.Read.All","AuditLog.Read.All","User.EnableDisableAccount.All","User.RevokeSessions.All","RoleManagement.Read.Directory"]}
-  accessToken = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJhdWQiOiJodHRwczovL2dyYXBoLm1pY3Jvc29mdC5jb20iLCJyb2xlcyI6WyJPcmdhbml6YXRpb24uUmVhZC5BbGwiLCJVc2VyLlJlYWQuQWxsIiwiTGljZW5zZUFzc2lnbm1lbnQuUmVhZC5BbGwiLCJHcm91cE1lbWJlci5SZWFkLkFsbCIsIkRldmljZS5SZWFkLkFsbCIsIkFwcGxpY2F0aW9uLlJlYWQuQWxsIiwiQXVkaXRMb2cuUmVhZC5BbGwiLCJVc2VyLkVuYWJsZURpc2FibGVBY2NvdW50LkFsbCIsIlVzZXIuUmV2b2tlU2Vzc2lvbnMuQWxsIiwiUm9sZU1hbmFnZW1lbnQuUmVhZC5EaXJlY3RvcnkiXX0.stub";
+  # {"aud":"https://graph.microsoft.com","roles":["Organization.Read.All","User.Read.All","LicenseAssignment.Read.All","GroupMember.Read.All","Device.Read.All","Application.Read.All","AuditLog.Read.All","User.EnableDisableAccount.All","User.RevokeSessions.All","RoleManagement.Read.Directory","User-PasswordProfile.ReadWrite.All","UserAuthMethod-TAP.ReadWrite.All","UserAuthenticationMethod.ReadWrite.All","GroupMember.ReadWrite.All"]}
+  accessToken = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJhdWQiOiJodHRwczovL2dyYXBoLm1pY3Jvc29mdC5jb20iLCJyb2xlcyI6WyJPcmdhbml6YXRpb24uUmVhZC5BbGwiLCJVc2VyLlJlYWQuQWxsIiwiTGljZW5zZUFzc2lnbm1lbnQuUmVhZC5BbGwiLCJHcm91cE1lbWJlci5SZWFkLkFsbCIsIkRldmljZS5SZWFkLkFsbCIsIkFwcGxpY2F0aW9uLlJlYWQuQWxsIiwiQXVkaXRMb2cuUmVhZC5BbGwiLCJVc2VyLkVuYWJsZURpc2FibGVBY2NvdW50LkFsbCIsIlVzZXIuUmV2b2tlU2Vzc2lvbnMuQWxsIiwiUm9sZU1hbmFnZW1lbnQuUmVhZC5EaXJlY3RvcnkiLCJVc2VyLVBhc3N3b3JkUHJvZmlsZS5SZWFkV3JpdGUuQWxsIiwiVXNlckF1dGhNZXRob2QtVEFQLlJlYWRXcml0ZS5BbGwiLCJVc2VyQXV0aGVudGljYXRpb25NZXRob2QuUmVhZFdyaXRlLkFsbCIsIkdyb3VwTWVtYmVyLlJlYWRXcml0ZS5BbGwiXX0.stub";
 
   # Seed data, ldbadd-ed into sam.ldb at provisioning: 250 users (more than
   # one page), vm-team with five users and the nested vm-sub (two more);
@@ -312,7 +312,7 @@ let
 
 
     def user_patch(h, query, key):
-        """Sets accountEnabled on a seeded user; the synced user is never written."""
+        """Sets accountEnabled on a seeded user, or takes a passwordProfile; the synced user is never written."""
         body = json.loads(h.body())
         for u in SEED["users"]:
             if urllib.parse.unquote(key) in (u["id"], u["userPrincipalName"]):
@@ -482,11 +482,11 @@ let
     # The startup probe: the roles claim decoded, P1 absent from subscribedSkus,
     # Intune present from its read probe. Later issues assert their hidden actions.
     probe = entra["probe"]
-    assert probe["roles"] == ["Organization.Read.All", "User.Read.All", "LicenseAssignment.Read.All", "GroupMember.Read.All", "Device.Read.All", "Application.Read.All", "AuditLog.Read.All", "User.EnableDisableAccount.All", "User.RevokeSessions.All", "RoleManagement.Read.Directory"], probe
+    assert probe["roles"] == ["Organization.Read.All", "User.Read.All", "LicenseAssignment.Read.All", "GroupMember.Read.All", "Device.Read.All", "Application.Read.All", "AuditLog.Read.All", "User.EnableDisableAccount.All", "User.RevokeSessions.All", "RoleManagement.Read.Directory", "User-PasswordProfile.ReadWrite.All", "UserAuthMethod-TAP.ReadWrite.All", "UserAuthenticationMethod.ReadWrite.All", "GroupMember.ReadWrite.All"], probe
     assert probe["licences"] == {"P1": "absent", "P2": "absent", "Intune": "present"}, probe
     assert "group_reads" not in probe and "notes" not in probe, probe
     assert entra["enabled_groups"] == ["core", "identity", "security", "policy", "devices", "infra"], entra
-    assert entra["password_writeback"] == {"value": "on", "source": "operator-declared"}, entra
+    assert entra["password_writeback"] == {"value": "off", "source": "operator-declared"}, entra
     hidden = {h["tool"] + " " + h["action"]: h["reason"] for h in entra["hidden_actions"]}
     assert sorted(hidden) == ["entra_device managed_get", "entra_device managed_search",
                               "entra_policy auth_methods_policy", "entra_policy conditional_access", "entra_policy named_locations", "entra_policy security_defaults",
@@ -633,7 +633,7 @@ let
     org = call("entra_org", {"action": "info"})
     print("entra_org info", json.dumps(org))
     assert org["displayName"] == "Example Org" and org["onPremisesSyncEnabled"] is True, org
-    assert org["password_writeback"]["value"] == "on" and org["password_writeback"]["source"] == "operator-declared", org
+    assert org["password_writeback"]["value"] == "off" and org["password_writeback"]["source"] == "operator-declared", org
     # The audit hint: the seeded Enable password writeback event.
     assert org["password_writeback"]["audit_hint"]["value"] == "enabled", org
 
@@ -646,10 +646,10 @@ let
     assert [a["initiatedBy"]["user"]["userPrincipalName"] for a in added] == ["admin@example.com"], added
 
     # Writes: the server runs with --capabilities ad-account-state,ad-passwords,ad-group-membership,ad-objects,ad-delete,
-    # ad-gpo-links,ad-password-policy,entra-account-state.
+    # ad-gpo-links,ad-password-policy,entra-account-state,entra-credentials,entra-group-membership.
     assert ad["enabled_capabilities"] == ["ad-account-state", "ad-passwords", "ad-group-membership", "ad-objects", "ad-delete",
                                           "ad-gpo-links", "ad-password-policy"], ad
-    assert entra["enabled_capabilities"] == ["entra-account-state"], entra
+    assert entra["enabled_capabilities"] == ["entra-account-state", "entra-credentials", "entra-group-membership"], entra
     api = next(t for t in listed["result"]["tools"] if t["name"] == "ad_api")
     assert api["inputSchema"]["properties"]["action"]["enum"] == ["search", "modify", "add", "delete", "rename"], api
     user = next(t for t in listed["result"]["tools"] if t["name"] == "ad_user")
@@ -764,6 +764,15 @@ let
     print("entra_user disable", json.dumps(w))
     assert w["id"] == "00000000-0000-0000-0000-000000000103" and w["endpoint"] == "PATCH /v1.0/users/entra-user3@example.com", w
     assert call("entra_user", {"action": "get", "id": w["id"]})["accountEnabled"] is False
+
+    # entra-credentials, with writeback declared off: the synced user's reset is refused and routed to AD; a cloud user's goes through.
+    why = refused("entra_user", {"action": "reset_password", "id": synced["id"], "confirm": "synced-user@example.com", "reason": "vm-test entra reset synced"})
+    print("entra_user reset_password synced", why)
+    assert "call ad_user reset_password on " + by_upn["dn"] in why and "--entra-password-writeback" in why, why
+    w = call("entra_user", {"action": "reset_password", "id": "entra-user2@example.com", "confirm": "entra-user2@example.com", "reason": "vm-test entra reset"})
+    assert w["endpoint"] == "PATCH /v1.0/users/entra-user2@example.com" and w["must_change"] is True and len(w["password"]) >= 20, w
+    with open("/tmp/vm-entra-password", "w") as fh:
+        fh.write(w["password"])
     print("ok")
   '';
 
@@ -924,7 +933,7 @@ pkgs.testers.runNixOSTest {
         logLevel = "debug";
         extraArgs = [
           "--capabilities"
-          "ad-account-state,ad-passwords,ad-group-membership,ad-objects,ad-delete,ad-gpo-links,ad-password-policy,entra-account-state"
+          "ad-account-state,ad-passwords,ad-group-membership,ad-objects,ad-delete,ad-gpo-links,ad-password-policy,entra-account-state,entra-credentials,entra-group-membership"
         ];
         http.authTokenFile = "/run/mcp-bearer";
         ad = {
@@ -939,7 +948,7 @@ pkgs.testers.runNixOSTest {
           certFile = "/run/entra-cert.pem";
           loginUrl = "http://127.0.0.1:${toString stubPort}";
           graphUrl = "http://127.0.0.1:${toString stubPort}";
-          passwordWriteback = "on";
+          passwordWriteback = "off";
         };
       };
     };
@@ -1009,8 +1018,16 @@ pkgs.testers.runNixOSTest {
             assert any(f'reason="vm-test {reason}"' in x and "outcome=ok" in x and f"capability={cap}" in x
                        for x in journal.splitlines()), reason
 
-    with subtest("the stub recorded the cloud user's disable and no write to the synced user"):
+    with subtest("the Entra reset password is in neither the journal nor the audit log, and the reset is audited"):
+        pw = machine.succeed("cat /tmp/vm-entra-password")
+        journal = machine.succeed("journalctl -o cat --no-pager -u microsoft-directory-mcp.service")
+        assert pw not in journal, "the Entra reset password leaked into the journal"
+        assert any('reason="vm-test entra reset"' in x and "outcome=ok" in x and "capability=entra-credentials" in x
+                   for x in journal.splitlines()), journal
+        assert any('reason="vm-test entra reset synced"' in x and 'outcome="not sent"' in x for x in journal.splitlines()), journal
+
+    with subtest("the stub recorded the cloud users' writes and no write to the synced user"):
         writes = machine.succeed("cat /tmp/stub-writes").splitlines()
-        assert writes == ["PATCH /v1.0/users/entra-user3@example.com"], writes
+        assert writes == ["PATCH /v1.0/users/entra-user3@example.com", "PATCH /v1.0/users/entra-user2@example.com"], writes
   '';
 }
