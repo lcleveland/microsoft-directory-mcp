@@ -377,7 +377,7 @@ func entraAccountState(action string) entraAction {
 		w.method, w.rels = http.MethodPost, []string{"/revokeSignInSessions"}
 		perms = []string{"User.RevokeSessions.All", "User.ReadWrite.All", "Directory.ReadWrite.All"}
 	}
-	return entraAction{Action{Name: action, Perms: perms, Capabilities: []string{"entra-account-state"}},
+	return entraAction{Action{Name: action, Perms: perms, AlsoPerms: roleRead, Capabilities: []string{"entra-account-state"}},
 		func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
 			w := w
 			w.id, w.in = in.ID, in.writeIn
@@ -395,7 +395,7 @@ func entraAccountState(action string) entraAction {
 // the delegated resetPassword. If Graph refuses it as on-premises mastered,
 // onPremMastered says so; move to resetPassword once delegated auth exists.
 var entraResetPassword = entraAction{Action{Name: "reset_password", Capabilities: []string{"entra-credentials"},
-	Perms: []string{"User-PasswordProfile.ReadWrite.All", "User.ReadWrite.All", "Directory.ReadWrite.All"}},
+	Perms: []string{"User-PasswordProfile.ReadWrite.All", "User.ReadWrite.All", "Directory.ReadWrite.All"}, AlsoPerms: roleRead},
 	func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
 		must := in.MustChange == nil || *in.MustChange
 		name, _, _ := strings.Cut(in.ID, "@")
@@ -414,7 +414,7 @@ var entraResetPassword = entraAction{Action{Name: "reset_password", Capabilities
 // Access Pass with the tenant policy's defaults. The reply is the one
 // place it appears.
 var entraIssueTAP = entraAction{Action{Name: "issue_tap", Capabilities: []string{"entra-credentials"},
-	Perms: []string{"UserAuthMethod-TAP.ReadWrite.All", "UserAuthenticationMethod.ReadWrite.All"}},
+	Perms: []string{"UserAuthMethod-TAP.ReadWrite.All", "UserAuthenticationMethod.ReadWrite.All"}, AlsoPerms: roleRead},
 	func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
 		var tap map[string]any
 		out, err := d.entraWrite(ctx, entraWrite{tool: "entra_user", action: "issue_tap", kind: entraUsers, id: in.ID, in: in.writeIn,
@@ -430,7 +430,7 @@ var entraIssueTAP = entraAction{Action{Name: "issue_tap", Capabilities: []string
 // (entra-credentials): one of the user's authentication methods, by id,
 // deleted from the collection of its type.
 var entraDeleteAuthMethod = entraAction{Action{Name: "delete_auth_method", Capabilities: []string{"entra-credentials"},
-	Perms: []string{"UserAuthenticationMethod.ReadWrite.All"}},
+	Perms: []string{"UserAuthenticationMethod.ReadWrite.All"}, AlsoPerms: roleRead},
 	func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
 		// The reason first, as in entraWrite: no read for a write that can't be made.
 		if strings.TrimSpace(in.Reason) == "" {
@@ -469,7 +469,7 @@ var entraDeleteAuthMethod = entraAction{Action{Name: "delete_auth_method", Capab
 // protected group is.
 func entraMembership(action string) entraAction {
 	return entraAction{Action{Name: action, Capabilities: []string{"entra-group-membership"},
-		Perms: []string{"GroupMember.ReadWrite.All", "Group.ReadWrite.All", "Directory.ReadWrite.All"}},
+		Perms: []string{"GroupMember.ReadWrite.All", "Group.ReadWrite.All", "Directory.ReadWrite.All"}, AlsoPerms: roleRead},
 		func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
 			if n := len(in.Members); n == 0 || n > maxMembers {
 				return nil, fmt.Errorf("%s takes 1 to %d members, got %d: call again for more", action, maxMembers, n)
@@ -525,7 +525,7 @@ func entraMembership(action string) entraAction {
 // (reprocessLicenseAssignment), entra-licenses. Allowed on synced users.
 func entraLicense(action string) entraAction {
 	return entraAction{Action{Name: action, Capabilities: []string{"entra-licenses"},
-		Perms: []string{"LicenseAssignment.ReadWrite.All", "User.ReadWrite.All", "Directory.ReadWrite.All"}},
+		Perms: []string{"LicenseAssignment.ReadWrite.All", "User.ReadWrite.All", "Directory.ReadWrite.All"}, AlsoPerms: roleRead},
 		func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
 			w := entraWrite{tool: "entra_user", action: action, kind: entraUsers, id: in.ID, in: in.writeIn, method: http.MethodPost}
 			if action == "reprocess_licenses" {
@@ -570,15 +570,13 @@ func entraDeviceState(action string) entraAction {
 // managed device, with no options. Intune
 // accepts the action and the device carries it out later, so the reply
 // says it was dispatched, not done.
-// ponytail: Perms is any-of, so the action shows with PrivilegedOperations.All
-// alone; the pre-read then fails closed (403) without a managedDevices read.
 func intuneAction(action string) entraAction {
 	op := map[string]string{"sync": "syncDevice", "reboot": "rebootNow", "retire": "retire", "wipe": "wipe"}[action]
 	capability, confirm := "intune-device-actions", false
 	if action == "retire" || action == "wipe" {
 		capability, confirm = "intune-retire-wipe", true
 	}
-	return entraAction{Action{Name: action, Perms: []string{"DeviceManagementManagedDevices.PrivilegedOperations.All"}, Licence: "Intune", Capabilities: []string{capability}},
+	return entraAction{Action{Name: action, Perms: []string{"DeviceManagementManagedDevices.PrivilegedOperations.All"}, AlsoPerms: intuneRead, Licence: "Intune", Capabilities: []string{capability}},
 		func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
 			w := entraWrite{tool: "entra_device", action: action, kind: entraManaged, id: in.ID, in: in.writeIn, confirm: confirm,
 				method: http.MethodPost, rels: []string{"/" + op}}
@@ -598,7 +596,7 @@ func intuneAction(action string) entraAction {
 // (entra-risk): one risky user, by object id. Allowed on synced users.
 func entraRiskAction(action string) entraAction {
 	op := map[string]string{"dismiss": "dismiss", "confirm_compromised": "confirmCompromised"}[action]
-	return entraAction{Action{Name: action, Perms: []string{"IdentityRiskyUser.ReadWrite.All"}, Licence: "P2", Capabilities: []string{"entra-risk"}},
+	return entraAction{Action{Name: action, Perms: []string{"IdentityRiskyUser.ReadWrite.All"}, AlsoPerms: roleRead, Licence: "P2", Capabilities: []string{"entra-risk"}},
 		func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
 			if !objectID.MatchString(in.ID) {
 				return nil, fmt.Errorf("id %q: want the user's object id (GUID), from risky_users", in.ID)
@@ -696,11 +694,11 @@ func mailNickname(name string) string {
 // properties of one object set in one PATCH, an empty value clearing one.
 // On a synced object only those sync never writes are allowed.
 func entraEdit(k entraKind) entraAction {
-	tool, perms := "entra_group", []string{"Group.ReadWrite.All", "Directory.ReadWrite.All"}
+	tool, perms, also := "entra_group", []string{"Group.ReadWrite.All", "Directory.ReadWrite.All"}, []string(nil)
 	if k.path == entraUsers.path {
-		tool, perms = "entra_user", []string{"User.ReadWrite.All", "Directory.ReadWrite.All"}
+		tool, perms, also = "entra_user", []string{"User.ReadWrite.All", "Directory.ReadWrite.All"}, roleRead
 	}
-	return entraAction{Action{Name: "edit", Perms: perms, Capabilities: []string{"entra-objects"}},
+	return entraAction{Action{Name: "edit", Perms: perms, AlsoPerms: also, Capabilities: []string{"entra-objects"}},
 		func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
 			if len(in.Properties) == 0 {
 				return nil, errors.New("edit needs properties")
@@ -722,7 +720,7 @@ func entraEdit(k entraKind) entraAction {
 
 // entraManager is entra_user set_manager or remove_manager (entra-objects).
 func entraManager(action string) entraAction {
-	return entraAction{Action{Name: action, Perms: []string{"User.ReadWrite.All", "Directory.ReadWrite.All"}, Capabilities: []string{"entra-objects"}},
+	return entraAction{Action{Name: action, Perms: []string{"User.ReadWrite.All", "Directory.ReadWrite.All"}, AlsoPerms: roleRead, Capabilities: []string{"entra-objects"}},
 		func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
 			w := entraWrite{tool: "entra_user", action: action, kind: entraUsers, id: in.ID, in: in.writeIn,
 				method: http.MethodDelete, rels: []string{"/manager/$ref"}}
@@ -744,14 +742,14 @@ func entraManager(action string) entraAction {
 // entraDelete is the delete action (entra-delete) of the entra_* tool of
 // k: one object, with confirm.
 func entraDelete(k entraKind) entraAction {
-	tool, perms := "entra_user", []string{"User.DeleteRestore.All", "User.ReadWrite.All", "Directory.ReadWrite.All"}
+	tool, perms, also := "entra_user", []string{"User.DeleteRestore.All", "User.ReadWrite.All", "Directory.ReadWrite.All"}, roleRead
 	switch k.path {
 	case entraGroups.path:
-		tool, perms = "entra_group", []string{"Group.ReadWrite.All", "Directory.ReadWrite.All"}
+		tool, perms, also = "entra_group", []string{"Group.ReadWrite.All", "Directory.ReadWrite.All"}, nil
 	case entraDevices.path:
-		tool, perms = "entra_device", []string{"Device.ReadWrite.All", "Directory.ReadWrite.All"}
+		tool, perms, also = "entra_device", []string{"Device.ReadWrite.All", "Directory.ReadWrite.All"}, nil
 	}
-	return entraAction{Action{Name: "delete", Perms: perms, Capabilities: []string{"entra-delete"}},
+	return entraAction{Action{Name: "delete", Perms: perms, AlsoPerms: also, Capabilities: []string{"entra-delete"}},
 		func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
 			return d.entraWrite(ctx, entraWrite{tool: tool, action: "delete", kind: k, id: in.ID, in: in.writeIn, confirm: true, method: http.MethodDelete})
 		}}
@@ -760,11 +758,11 @@ func entraDelete(k entraKind) entraAction {
 // entraRestore is entra_user or entra_group restore (entra-delete): one
 // deleted object, by its id, from directory/deletedItems.
 func entraRestore(k entraKind) entraAction {
-	tool, perms := "entra_group", []string{"Group.ReadWrite.All", "Directory.ReadWrite.All"}
+	tool, perms, also := "entra_group", []string{"Group.ReadWrite.All", "Directory.ReadWrite.All"}, []string(nil)
 	if k.path == entraUsers.path {
-		tool, perms = "entra_user", []string{"User.DeleteRestore.All", "User.ReadWrite.All", "Directory.ReadWrite.All"}
+		tool, perms, also = "entra_user", []string{"User.DeleteRestore.All", "User.ReadWrite.All", "Directory.ReadWrite.All"}, roleRead
 	}
-	return entraAction{Action{Name: "restore", Perms: perms, Capabilities: []string{"entra-delete"}},
+	return entraAction{Action{Name: "restore", Perms: perms, AlsoPerms: also, Capabilities: []string{"entra-delete"}},
 		func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
 			return d.entraWrite(ctx, entraWrite{tool: tool, action: "restore", kind: entraDeleted, id: in.ID, in: in.writeIn,
 				method: http.MethodPost, rels: []string{"/restore"}, typ: k.typ})

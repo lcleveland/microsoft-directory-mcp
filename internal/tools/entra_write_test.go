@@ -315,7 +315,7 @@ func TestEntraAccountStateRegisters(t *testing.T) {
 	if p := props(t, cs, "entra_group"); slices.Contains(p, "reason") {
 		t.Errorf("entra_group, with no write, has reason: %v", p)
 	}
-	cs, _ = entraSession(t, &graph.Probe{Roles: []string{"User.Read.All", "User.RevokeSessions.All"}}, func(*http.Request) string { return `{}` }, "entra-account-state")
+	cs, _ = entraSession(t, &graph.Probe{Roles: []string{"User.Read.All", "User.RevokeSessions.All", "RoleManagement.Read.Directory"}}, func(*http.Request) string { return `{}` }, "entra-account-state")
 	if got := listed(t, cs)["entra_user"]; !slices.Equal(got[len(got)-1:], []string{"revoke_sessions"}) || slices.Contains(got, "disable") {
 		t.Errorf("entra_user with only User.RevokeSessions.All: %v", got)
 	}
@@ -486,6 +486,19 @@ func TestEntraCredentialsRegister(t *testing.T) {
 	}
 	if p := props(t, cs, "entra_group"); !slices.Contains(p, "members") || !slices.Contains(p, "reason") || slices.Contains(p, "confirm") {
 		t.Errorf("entra_group: %v", p)
+	}
+}
+
+// A write needs the role read its protected-target check makes too:
+// without it reset_password is hidden, and entra_status says why.
+func TestEntraWriteNeedsRoleRead(t *testing.T) {
+	cs, _ := entraSession(t, &graph.Probe{Roles: []string{"User.Read.All", "User-PasswordProfile.ReadWrite.All"}, Licences: map[string]string{}}, func(*http.Request) string { return `{}` }, "entra-credentials")
+	if slices.Contains(listed(t, cs)["entra_user"], "reset_password") {
+		t.Errorf("entra_user: %v", listed(t, cs)["entra_user"])
+	}
+	want := "entra_user reset_password: missing permission: needs one of " + strings.Join(roleRead, ", ")
+	if h := hidden(status(t, cs, "entra_status")); !slices.Contains(h, want) {
+		t.Errorf("hidden %q, want %q", h, want)
 	}
 }
 
@@ -831,8 +844,9 @@ func TestIntuneActionsRegister(t *testing.T) {
 		t.Errorf("entra_device: %v", p)
 	}
 	for name, probe := range map[string]*graph.Probe{
-		"no Intune":     {Licences: map[string]string{"Intune": graph.Absent}},
-		"no permission": {Roles: []string{"DeviceManagementManagedDevices.Read.All"}},
+		"no Intune":              {Licences: map[string]string{"Intune": graph.Absent}},
+		"no permission":          {Roles: []string{"DeviceManagementManagedDevices.Read.All"}},
+		"no managed-device read": {Roles: []string{"DeviceManagementManagedDevices.PrivilegedOperations.All"}},
 	} {
 		cs, _ := entraSession(t, probe, func(*http.Request) string { return `{}` }, caps...)
 		if g := listed(t, cs)["entra_device"]; slices.ContainsFunc(g, func(a string) bool { return slices.Contains(actions, a) }) {

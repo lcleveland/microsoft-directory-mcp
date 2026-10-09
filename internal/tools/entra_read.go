@@ -373,6 +373,8 @@ var (
 	groupRead  = []string{"GroupMember.Read.All", "Group.Read.All", "Directory.Read.All"}
 	deviceRead = []string{"Device.Read.All", "Directory.Read.All"}
 	intuneRead = []string{"DeviceManagementManagedDevices.Read.All", "DeviceManagementManagedDevices.ReadWrite.All"}
+	// apiWritePerms are entra_api's writes: allowlisted edits of users and groups.
+	apiWritePerms = []string{"User.ReadWrite.All", "Group.ReadWrite.All", "Directory.ReadWrite.All"}
 )
 
 func init() {
@@ -442,8 +444,9 @@ func init() {
 			entraDelete(entraDevices), entraDeviceState("disable"), entraDeviceState("enable"),
 			intuneAction("sync"), intuneAction("reboot"), intuneAction("retire"), intuneAction("wipe"),
 		),
-		Tool{Name: "entra_api", Group: "core", Actions: []Action{{Name: "get"}, {Name: "post", Capabilities: entraCapabilities()},
-			{Name: "patch", Capabilities: entraCapabilities()}, {Name: "put", Capabilities: entraCapabilities()}, {Name: "delete", Capabilities: entraCapabilities()}},
+		Tool{Name: "entra_api", Group: "core", Actions: []Action{{Name: "get"}, {Name: "post", Perms: apiWritePerms, Capabilities: entraCapabilities()},
+			{Name: "patch", Perms: apiWritePerms, Capabilities: entraCapabilities()}, {Name: "put", Perms: apiWritePerms, Capabilities: entraCapabilities()},
+			{Name: "delete", Perms: apiWritePerms, Capabilities: entraCapabilities()}},
 			add: func(s *mcp.Server, d Deps, t Tool, visible []string) {
 				desc := "Raw Graph GET when no entra_* tool fits. get: any path under /v1.0/ or /beta/, as " +
 					"Graph returns it; a collection pages like the entra_* lists (200 at a time, next_cursor). " +

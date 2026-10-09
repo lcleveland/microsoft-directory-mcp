@@ -391,7 +391,9 @@ Each action needs any one of the permissions it accepts. This list covers every 
 | `entra-licenses` | `LicenseAssignment.ReadWrite.All` |
 | `entra-devices` | `Device.ReadWrite.All` |
 | `entra-risk` | `IdentityRiskyUser.ReadWrite.All` |
-| `intune-device-actions`, `intune-retire-wipe` | `DeviceManagementManagedDevices.PrivilegedOperations.All` |
+| `intune-device-actions`, `intune-retire-wipe` | `DeviceManagementManagedDevices.PrivilegedOperations.All`, and `DeviceManagementManagedDevices.Read.All` for the pre-read |
+
+A write that can reach a user also needs `RoleManagement.Read.Directory` for the protected-target check. The startup probe hides a write whose permissions are not all granted, and `entra_status` says which is missing.
 
 **Directory role: User Administrator at most.** For app-only calls, Graph requires a directory role on the service principal for sensitive writes, on top of the permission. Password reset needs User Administrator for any target. Assign User Administrator to the app's service principal only when `entra-credentials` is on. Every other write needs no role, because it only ever targets non-admins.
 

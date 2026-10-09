@@ -272,7 +272,7 @@ func (d Deps) writebackHint(ctx context.Context) map[string]any {
 
 var (
 	appRead     = []string{"Application.Read.All", "Directory.Read.All"}
-	roleRead    = []string{"RoleManagement.Read.Directory", "RoleManagement.Read.All", "Directory.Read.All"}
+	roleRead    = []string{"RoleManagement.Read.Directory", "RoleManagement.Read.All", "Directory.Read.All", "RoleManagement.ReadWrite.Directory", "Directory.ReadWrite.All"}
 	licenceRead = []string{"LicenseAssignment.Read.All", "Organization.Read.All", "Directory.Read.All"}
 	orgRead     = []string{"Organization.Read.All", "Directory.Read.All"}
 )
