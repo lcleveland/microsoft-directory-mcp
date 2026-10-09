@@ -109,6 +109,34 @@ func TestModifyRails(t *testing.T) {
 		t.Errorf("lonely: %v %q", err, f.modifies)
 	}
 
+	// A domain head (isCriticalSystemObject) takes a gPLink or gPOptions modify alone.
+	head := f.tree[strings.ToLower(corpDN)]
+	head["objectClass"], head["isCriticalSystemObject"] = []string{"top", "domain", "domainDNS"}, []string{"TRUE"}
+	gpo := func(attrs ...string) func(*ldap.Entry) (any, error) {
+		return func(e *ldap.Entry) (any, error) {
+			req := ldap.NewModifyRequest(e.DN, nil)
+			for _, a := range attrs {
+				req.Replace(a, []string{"1"})
+			}
+			return req, nil
+		}
+	}
+	if _, err := c.Modify(ctx, corpDN, "(objectClass=domainDNS)", nil, gpo("gPLink", "gPOptions")); err != nil || len(f.modifies) != 3 {
+		t.Errorf("domain head gPLink: %v %q", err, f.modifies)
+	}
+	for _, vet := range []func(*ldap.Entry) (any, error){describe, gpo("gPOptions", "description"), gpo(),
+		func(e *ldap.Entry) (any, error) { return ldap.NewDelRequest(e.DN, nil), nil }} {
+		if _, err := c.Modify(ctx, corpDN, "(objectClass=*)", nil, vet); !errors.Is(err, ErrProtected) {
+			t.Errorf("domain head: want a protected refusal, got %v", err)
+		}
+	}
+	if _, err := c.Modify(ctx, "OU=Domain Controllers,"+corpDN, "(objectClass=*)", nil, gpo("gPLink")); !errors.Is(err, ErrProtected) {
+		t.Errorf("Domain Controllers OU gPLink: %v", err)
+	}
+	if len(f.modifies) != 3 {
+		t.Errorf("sent anyway: %q", f.modifies)
+	}
+
 	// vet refusing sends nothing; a wrong class matches nothing.
 	boom := errors.New("confirm mismatch")
 	if _, err := c.Modify(ctx, plain, userClass, nil, func(*ldap.Entry) (any, error) { return nil, boom }, nil); !errors.Is(err, boom) {
@@ -117,7 +145,7 @@ func TestModifyRails(t *testing.T) {
 	if _, err := c.Modify(ctx, plain, "(objectClass=computer)", nil, describe, nil); !errors.Is(err, ErrNoMatch) {
 		t.Errorf("wrong class: %v", err)
 	}
-	if len(f.modifies) != 2 {
+	if len(f.modifies) != 3 {
 		t.Errorf("sent anyway: %q", f.modifies)
 	}
 

@@ -832,6 +832,17 @@ let
     assert [(x["displayName"], x["link_order"], x["enforced"]) for x in links["links"]] == [("vm-gpo-b", 1, True), ("vm-gpo-a", 2, True)], links
     assert [x["displayName"] for x in links["inheritance"]] == ["vm-gpo-b", "vm-gpo-a", "Default Domain Policy"], links
 
+    # ad-gpo-links on the domain head (isCriticalSystemObject): link, unlink and block inheritance, then put it back.
+    w = call("ad_gpo", {"action": "link", "id": "${base}", "gpo": "${gpoA}", "reason": "vm-test link domain head"})
+    print("ad_gpo link domain head", json.dumps(w))
+    assert [x["displayName"] for x in call("ad_gpo", {"action": "links", "domain": "corp.example.com"})["links"]] == ["Default Domain Policy", "vm-gpo-a"], w
+    w = call("ad_gpo", {"action": "unlink", "id": "${base}", "gpo": "${gpoA}", "reason": "vm-test unlink domain head"})
+    assert "${lib.toLower (gpoDN gpoA)}" not in [x["gpo"].lower() for x in w["links"]] and len(w["links"]) == 1, w
+    call("ad_gpo", {"action": "block_inheritance", "id": "${base}", "reason": "vm-test block domain head"})
+    assert call("ad_gpo", {"action": "links", "domain": "corp.example.com"})["block_inheritance"]
+    call("ad_gpo", {"action": "block_inheritance", "id": "${base}", "block": False, "reason": "vm-test unblock domain head"})
+    assert not call("ad_gpo", {"action": "links", "domain": "corp.example.com"})["block_inheritance"]
+
     # entra-account-state: the synced user's disable is refused and routed to AD; a cloud user's goes through.
     why = refused("entra_user", {"action": "disable", "id": synced["id"], "reason": "vm-test entra synced"})
     print("entra_user disable synced", why)
@@ -960,6 +971,11 @@ pkgs.testers.runNixOSTest {
               | ldbmodify -H /var/lib/samba-dc/private/sam.ldb --controls=show_deleted:1
             samba-tool dsacl set -H /var/lib/samba-dc/private/sam.ldb -s ${smbConf} \
               --objectdn='${base}' --sddl="(OA;;CR;45ec5156-db7e-47bb-b53f-dbeb2d03c40f;;$svcSid)"
+            # And write the domain head's gPLink and gPOptions, as ad-gpo-links delegation does.
+            samba-tool dsacl set -H /var/lib/samba-dc/private/sam.ldb -s ${smbConf} \
+              --objectdn='${base}' --sddl="(OA;;WP;f30e3bbe-9ff0-11d1-b603-0000f80367c1;;$svcSid)"
+            samba-tool dsacl set -H /var/lib/samba-dc/private/sam.ldb -s ${smbConf} \
+              --objectdn='${base}' --sddl="(OA;;WP;f30e3bbf-9ff0-11d1-b603-0000f80367c1;;$svcSid)"
             # Writes read tokenGroups to find protected-group members; the bind account needs this group for that.
             samba-tool group addmembers 'Windows Authorization Access Group' ${bindUser} -s ${smbConf}
             # A protected target: a Domain Admins member, though writable by the bind account.

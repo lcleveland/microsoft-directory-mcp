@@ -33,7 +33,8 @@ var (
 // Modify writes the one object dn, if it matches class, on its domain's
 // PDC emulator (see Write). There it first reads the target (preRead plus
 // attrs; deleted objects too, for a restore) and refuses a protected
-// target; then vet checks the entry and builds the request, a modify,
+// target (bar a modify of a domain head's gPLink or gPOptions alone);
+// then vet checks the entry and builds the request, a modify,
 // delete or modify DN of it, which is sent once. Nothing is sent when vet
 // errs. sending, if not nil, is called once nothing is left to refuse,
 // just before the request is sent.
@@ -52,12 +53,22 @@ func (c *Client) Modify(ctx context.Context, dn, class string, attrs []string, v
 			return err
 		}
 		e := res.Entries[0]
-		if why := protected(e); why != "" {
+		// A domain head is a critical system object, yet its GPO links are
+		// written (ad-gpo-links): a modify of gPLink or gPOptions alone.
+		why := protected(e)
+		head := why == "isCriticalSystemObject" && slices.ContainsFunc(e.GetAttributeValues("objectClass"),
+			func(c string) bool { return strings.EqualFold(c, "domainDNS") })
+		if why != "" && !head {
 			return fmt.Errorf("%s: %w: %s", dn, ErrProtected, why)
 		}
 		req, err := vet(e)
 		if err != nil {
 			return err
+		}
+		if m, ok := req.(*ldap.ModifyRequest); head && (!ok || len(m.Changes) == 0 || slices.ContainsFunc(m.Changes, func(ch ldap.Change) bool {
+			return !strings.EqualFold(ch.Modification.Type, "gPLink") && !strings.EqualFold(ch.Modification.Type, "gPOptions")
+		})) {
+			return fmt.Errorf("%s: %w: %s", dn, ErrProtected, why)
 		}
 		// A deleted object is written only by a modify that itself shows deleted objects: a restore.
 		if m, ok := req.(*ldap.ModifyRequest); strings.EqualFold(e.GetAttributeValue("isDeleted"), "TRUE") &&
