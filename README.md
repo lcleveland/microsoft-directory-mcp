@@ -6,7 +6,7 @@ An MCP server for one on-premises Active Directory **forest** and one Entra ID *
 - **Read-only by default.** Writes are turned on per **capability**. Every write needs a reason, which goes to the audit log, and acts on one target, by id.
 - **Some writes never happen:** writes to protected targets (tier-0 AD objects, Entra admins), and a fixed list of dangerous operations that no capability exposes. See [Write capabilities](#write-capabilities).
 
-The AD side speaks LDAP only (LDAPS, or StartTLS), plus DNS for discovery. The Entra side speaks Microsoft Graph v1.0 with an app-only certificate credential.
+The AD side speaks LDAP only (LDAPS, or StartTLS), plus DNS for discovery. The Entra side speaks Microsoft Graph v1.0 with an app-only certificate credential. Beta is reached only by `entra_api get`, for reads, and its replies are marked unstable.
 
 ## Tools
 
@@ -53,7 +53,7 @@ Searches and lists:
 - cap a page at 200 items and 60 KiB, and add a `_truncation` note when they have to cut;
 - return `next_cursor` when there is more. Pass it back as `cursor`, with the same arguments.
 
-Graph reads that get a 429 or 503 wait out `Retry-After` and are retried. Writes are never retried, on either side.
+Graph reads that get a 429 or 503 wait out `Retry-After` and are retried. Writes are never retried, on either side, with one exception: a Graph call that gets a 401 is sent once more with a fresh token, because Graph rejects a 401 before it processes the call.
 
 ## Write capabilities
 
@@ -84,7 +84,7 @@ All are off by default. Turn them on with `--capabilities a,b,...` (or `capabili
 These hold whatever capabilities are on:
 - **Protected targets are refused in code.**
   - In AD: `adminCount=1`, RID below 1000, `isCriticalSystemObject`, domain controllers, protected groups and anything nested in them. That includes the forest root domain's BUILTIN groups for a principal of another domain, `DnsAdmins`, and the groups in `--protected-groups`. A membership the server can't read is a refusal.
-  - In Entra: any directory-role holder, any member or owner of a role-assignable group, and any owner of an application or service principal.
+  - In Entra: any directory-role holder, any role-assignable group, any member or owner of one, and any owner of an application or service principal.
   - For policy: a PSO apply that would reach a protected target, editing a PSO that already applies to one, and GPO link changes on the Domain Controllers OU.
 - **One target per write, by id.** There is no bulk mode and no selecting targets by filter. Delete, password reset, and Intune retire and wipe need `confirm` set to the target's name.
 - **Every write needs `reason`.** It is audit-logged with the tool, action and target, before the write and again with the outcome. Logs go to stderr.
@@ -94,8 +94,8 @@ These hold whatever capabilities are on:
 - **Raw tools never bypass these rules.** In `ad_api` and `entra_api`, a write that a first-class action covers is refused and pointed to that action. Any other write is refused unless it is an allowlisted attribute edit.
 
 **Never exposed:**
-- **AD:** UAC bits other than disable, SPNs, key credentials, resource-based constrained delegation, `sIDHistory`, ACLs, cross-domain moves, tree delete, AdminSDHolder, `dSHeuristics`, GPO content, schema and configuration, trusts.
-- **Entra:** Conditional Access, named locations, the authentication methods policy, security defaults, role assignments and PIM, app and service principal credentials, consent grants, and source-of-authority conversion.
+- **AD:** UAC bits other than disable, SPNs, key credentials, resource-based constrained delegation, `sIDHistory`, ACLs, cross-domain moves, tree delete, AdminSDHolder, `dSHeuristics`, GPO creation and content, schema and configuration, trusts, `ms-DS-MachineAccountQuota`.
+- **Entra:** Conditional Access, named locations, the authentication methods policy, security defaults, role assignments and PIM, app and service principal creation and credentials, consent grants, and source-of-authority conversion.
 
 ## Hybrid behaviour
 
@@ -302,7 +302,18 @@ Then convert each certificate to PEM and concatenate them into one bundle:
 openssl x509 -inform der -in "Example Root CA.cer" -out corp-ca.pem
 ```
 
-Compare the certificate's fingerprint (`openssl x509 -noout -fingerprint -sha256 -in corp-ca.pem`) with the one the CA shows before you trust it.
+No Windows machine is needed: from Linux, read the same attribute with OpenLDAP's `ldapsearch` and write the bundle directly. This first read has to skip certificate verification, because the CA isn't trusted yet. `-W` prompts for the bind password:
+
+```sh
+LDAPTLS_REQCERT=never ldapsearch -LLL -o ldif-wrap=no -W \
+  -H ldaps://dc1.corp.example.com -D svc-mcp@corp.example.com \
+  -b "CN=Certification Authorities,CN=Public Key Services,CN=Services,CN=Configuration,DC=corp,DC=example,DC=com" \
+  "(objectClass=certificationAuthority)" cACertificate |
+  sed -n 's/^cACertificate:: //p' |
+  while read -r der; do echo "$der" | base64 -d | openssl x509 -inform der; done > corp-ca.pem
+```
+
+Either way, compare the certificate's fingerprint (`openssl x509 -noout -fingerprint -sha256 -in corp-ca.pem`) with the one the CA shows, or the one in a domain-joined Windows machine's Trusted Root store, before you trust it.
 
 ### Read rights
 
@@ -379,7 +390,7 @@ Each action needs any one of the permissions it accepts. This list covers every 
 | `LicenseAssignment.Read.All` | `entra_license skus`; the probe's licence check |
 | `Organization.Read.All` | `entra_org`, `entra_status` |
 
-`entra_api get` can reach any v1.0 path, but only within what these permissions allow.
+`entra_api get` can reach any v1.0 or beta path, but only within what these permissions allow. Beta replies carry `_unstable`: Microsoft doesn't support beta in production and changes it without notice.
 
 ### Write permissions and the directory role
 

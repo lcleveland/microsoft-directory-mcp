@@ -923,8 +923,8 @@ func (d Deps) apiWrite(ctx context.Context, in entraAPIIn) (map[string]any, erro
 			return nil, errors.New("patch needs a body")
 		}
 	}
-	// Only a patch of an allowlisted property of users, groups or devices
-	// classifies raw; that write takes the rails, everything else is refused.
+	// A patch on a user, group or device takes the rails, where only an
+	// allowlisted user or group property classifies; everything else is refused.
 	if segs := strings.Split(strings.Trim(rest, "/"), "/"); len(segs) == 2 && method == http.MethodPatch {
 		if k, ok := entraKinds[segs[0]]; ok {
 			return d.entraWrite(ctx, entraWrite{tool: "entra_api", action: in.Action, kind: k, id: segs[1], in: writeIn{Reason: in.Reason},

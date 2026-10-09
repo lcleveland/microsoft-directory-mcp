@@ -9,7 +9,7 @@ On top of the capabilities, these rules hold no matter what the operator enables
 
 **Protected targets are refused in code. No capability lifts this.**
 - **AD tier-0:** `adminCount=1`, RID < 1000, `isCriticalSystemObject`, DCs, protected groups and anything nested into them. The forest root domain's BUILTIN protected groups count for a principal of any domain. `DnsAdmins` (by name, per domain) counts too, and so do the operator's `--protected-groups`. A cross-domain membership that can't be read refuses the write.
-- **Entra admins:** any directory-role holder, any member or owner of a role-assignable group, and any owner of an application or service principal (its owner can add a credential and act as it, whatever it holds).
+- **Entra admins:** any directory-role holder, any role-assignable group, any member or owner of one, and any owner of an application or service principal (its owner can add a credential and act as it, whatever it holds).
 - **Policy reaching a protected target:** a PSO apply that would reach one, editing a PSO that already applies to one, and gPLink or gPOptions changes on the Domain Controllers OU. GPO links on a site or the domain head also reach DCs; they stay allowed by design (#12, #60).
 
 As a result the service principal only ever needs User Administrator, never Privileged Authentication Administrator.
@@ -24,11 +24,11 @@ As a result the service principal only ever needs User Administrator, never Priv
 - Entra password reset on a synced user needs writeback to be declared on.
 - AD writes to an object whose counterpart is cloud-managed are refused.
 
-**Raw tools never bypass the rails.** In `ad_api` and `entra_api`, a write that a first-class action covers is refused and pointed to that action. Raw writes are left with `ad-objects` allowlisted attribute edits on any class (an `ad_api` modify), and `entra-objects` allowlisted property edits on a user or group (an `entra_api` PATCH). Every other raw write is refused.
+**Raw tools never bypass the rails.** In `ad_api` and `entra_api`, a write that a first-class action covers is refused and pointed to that action. Raw writes are left with `ad-objects` allowlisted attribute edits on a user, group or computer (an `ad_api` modify; OUs, contacts and other classes are refused), and `entra-objects` allowlisted property edits on a user or group (an `entra_api` PATCH). Every other raw write is refused.
 
 **Never exposed:**
-- **AD:** other UAC bits, SPNs, key credentials, RBCD, sIDHistory, ACLs, cross-domain moves, tree delete, AdminSDHolder, dSHeuristics, GPO content, schema and config, trusts.
-- **Entra:** CA, named locations, the auth-methods policy, security defaults, role assignments and PIM, app and SP credentials, consent grants, and source-of-authority conversion.
+- **AD:** other UAC bits, SPNs, key credentials, RBCD, sIDHistory, ACLs, cross-domain moves, tree delete, AdminSDHolder, dSHeuristics, GPO creation and content, schema and config, trusts, MachineAccountQuota.
+- **Entra:** CA, named locations, the auth-methods policy, security defaults, role assignments and PIM, app and SP creation and credentials, consent grants, and source-of-authority conversion.
 
 The `ad-objects` attribute allowlist is fixed in code. Connect Sync's OU filter can't be read, so moving an object that has a counterpart returns a warning, not a refusal.
 

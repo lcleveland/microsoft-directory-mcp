@@ -19,7 +19,7 @@ A server hosting a domain's copy of the directory that the server process connec
 _Avoid_: DC server, AD server, LDAP server
 
 **Global catalog**:
-A domain controller that also holds a partial, read-only copy of every domain in the forest; where forest-wide finds go.
+A domain controller that also holds a partial, read-only copy of every domain in the forest; used only to find which domain holds an object, never for lists.
 _Avoid_: GC server, forest index
 
 **PDC emulator**:
@@ -59,7 +59,7 @@ A named class of write the operator opts into; writes outside an enabled capabil
 _Avoid_: permission, verb flag
 
 **Protected target**:
-An object the server never writes, whatever capabilities are enabled: a tier-0 object in the forest (counting DnsAdmins and the operator's `--protected-groups` as tier-0 groups), or a user holding an admin role (or in a role-assignable group, or owning an app or service principal) in the tenant.
+An object the server never writes, whatever capabilities are enabled: a tier-0 object in the forest (counting DnsAdmins and the operator's `--protected-groups` as tier-0 groups), or a role-assignable group, or a user holding an admin role (or in or owning a role-assignable group, or owning an app or service principal) in the tenant.
 _Avoid_: privileged object, admin object, tier-0 (alone)
 
 **Tool group**:
