@@ -306,7 +306,7 @@ func TestGuard(t *testing.T) {
 		if err != nil || want == "" && why != "" || want != "" && !strings.Contains(why, want) {
 			t.Errorf("%s: %q %v, want %q", dn, why, err, want)
 		}
-		if _, err := c.Modify(ctx, dn, "(objectClass=*)", nil, describe); want != "" && !errors.Is(err, ErrProtected) || want == "" && err != nil {
+		if _, err := c.Modify(ctx, dn, "(objectClass=*)", nil, describe, nil); want != "" && !errors.Is(err, ErrProtected) || want == "" && err != nil {
 			t.Errorf("modify %s: %v", dn, err)
 		}
 	}
@@ -320,7 +320,7 @@ func TestGuard(t *testing.T) {
 	if why, err := c.Protected(ctx, free); err == nil || !strings.Contains(err.Error(), "global catalog") {
 		t.Errorf("no GC: %q", why)
 	}
-	if _, err := c.Modify(ctx, free, "(objectClass=*)", nil, describe); err == nil || len(f.modifies) != 1 {
+	if _, err := c.Modify(ctx, free, "(objectClass=*)", nil, describe, nil); err == nil || len(f.modifies) != 1 {
 		t.Errorf("no GC modify: %v %q", err, f.modifies)
 	}
 	// An unresolvable --protected-groups group refuses too.
