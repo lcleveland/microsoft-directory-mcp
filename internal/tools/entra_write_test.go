@@ -130,7 +130,7 @@ func entraWriteStub(write string) func(*http.Request) string {
 		case path.Base(p) == g2:
 			return `{"id":"` + g2 + `","displayName":"synced","onPremisesSyncEnabled":true,"onPremisesSecurityIdentifier":"S-1-5-21-1-2-3-1106"}`
 		case path.Base(p) == g3:
-			return `{"id":"` + g3 + `","displayName":"tier0","isAssignableToRole":true}`
+			return `{"@odata.type":"#microsoft.graph.group","id":"` + g3 + `","displayName":"tier0","isAssignableToRole":true}`
 		case path.Base(p) == u2:
 			return `{"id":"` + u2 + `","userPrincipalName":"u2@example.com","onPremisesSyncEnabled":true,"onPremisesSecurityIdentifier":"S-1-5-21-1-2-3-1105"}`
 		case strings.Contains(p, "/deletedItems/"):
@@ -562,6 +562,7 @@ func TestEntraEdit(t *testing.T) {
 			"call entra_user disable or enable instead"},
 		{"not allowlisted", entraEdit(entraUsers), entraIn{ID: u1, Properties: map[string]string{"mail": "x@example.com"}}, "not a write this server makes"},
 		{"none", entraEdit(entraUsers), entraIn{ID: u1}, "edit needs properties"},
+		{"clear displayName", entraEdit(entraUsers), entraIn{ID: u1, Properties: map[string]string{"displayName": ""}}, "displayName can't be cleared"},
 		{"protected", entraEdit(entraUsers), entraIn{ID: u3, Properties: map[string]string{"jobTitle": "x"}}, "protected target"},
 		{"synced manager", entraManager("set_manager"), entraIn{ID: u2, Manager: u1}, "call ad_object edit"},
 		{"manager not a GUID", entraManager("set_manager"), entraIn{ID: u1, Manager: "boss@example.com"}, "want the manager's object id"},
@@ -611,6 +612,7 @@ func TestEntraDeleteRestore(t *testing.T) {
 		{"protected", entraDelete(entraGroups), entraIn{ID: g3, writeIn: writeIn{Confirm: "tier0"}}, "protected target: it is a role-assignable group"},
 		{"deleted role-assignable group", entraRestore(entraGroups), entraIn{ID: g3}, "protected target: it is a role-assignable group"},
 		{"deleted role holder", entraRestore(entraUsers), entraIn{ID: u6}, "protected target: it holds the directory role"},
+		{"restore of another kind", entraRestore(entraGroups), entraIn{ID: u1}, "is a #microsoft.graph.user, not a group"},
 	} {
 		d, _, writes := entraWriteDeps(t, "", "entra-delete")
 		_, err := entraCall(d, tc.a, tc.in)

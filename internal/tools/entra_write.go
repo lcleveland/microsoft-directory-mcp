@@ -120,7 +120,7 @@ func classifyEntra(method, path string, props []string, raw bool) ([]entraOp, er
 		switch {
 		case i >= 0 && raw:
 			o := entraOps[i]
-			return nil, fmt.Errorf("entra_api %s %s: call %s instead (the %s capability)", method, path, o.action, o.capability)
+			return nil, fmt.Errorf("%s %s: call %s instead (the %s capability)", method, path, o.action, o.capability)
 		case i >= 0:
 			ops = append(ops, entraOps[i])
 		case raw && len(segs) == 2 && hasFold(entraObjectProps[segs[0]], prop):
@@ -150,10 +150,12 @@ type entraWrite struct {
 	body         map[string]any
 	check        func(context.Context) error // more refusals, after the target's
 	reply        any                         // decodes the last call's reply
+	typ          string                      // the target's @odata.type must be this, when set
 }
 
-// entraWrite runs w through the Entra rails. Every Entra write goes through
-// here, so none skips the reason, the capability its call classifies to,
+// entraWrite runs w through the Entra rails. Every Entra write to an
+// existing object goes through here (create, with none, is entraCreate),
+// so none skips the reason, the capability its call classifies to,
 // the pre-read, the protected target and source of authority refusals, or
 // the audit log. Nothing is retried.
 func (d Deps) entraWrite(ctx context.Context, w entraWrite) (map[string]any, error) {
@@ -217,6 +219,9 @@ func (d Deps) entraWrite(ctx context.Context, w entraWrite) (map[string]any, err
 				what = "userPrincipalName"
 			}
 			return nil, fmt.Errorf("confirm must be the target's %s: %v is %q. Check it is the object you mean, then retry", what, tgt["id"], cmp.Or(upn, name))
+		}
+		if w.typ != "" && tgt["@odata.type"] != w.typ {
+			return nil, fmt.Errorf("%v is a %v, not a %s: call the tool of its kind", tgt["id"], tgt["@odata.type"], strings.TrimPrefix(w.typ, "#microsoft.graph."))
 		}
 		if err := d.entraProtected(ctx, w.kind, tgt); err != nil {
 			return nil, err
@@ -531,7 +536,7 @@ func entraCreate(k entraKind) entraAction {
 				if in.Name == "" {
 					return errors.New("create needs name, the new object's displayName")
 				}
-				if tool == "entra_user" {
+				if k.path == entraUsers.path {
 					nick, _, ok := strings.Cut(in.UPN, "@")
 					if !ok || nick == "" {
 						return errors.New("create needs upn, the new user's userPrincipalName")
@@ -587,7 +592,7 @@ func mailNickname(name string) string {
 		}
 		return -1
 	}, name)
-	return cmp.Or(nick, "group")
+	return cmp.Or(nick[:min(len(nick), 64)], "group") // Graph takes up to 64
 }
 
 // entraEdit is entra_user or entra_group edit (entra-objects): allowlisted
@@ -606,6 +611,9 @@ func entraEdit(k entraKind) entraAction {
 			body := map[string]any{}
 			for p, v := range in.Properties {
 				body[p] = v
+				if v == "" && strings.EqualFold(p, "displayName") {
+					return nil, errors.New("displayName can't be cleared, only changed")
+				}
 				if v == "" {
 					body[p] = nil
 				}
@@ -662,7 +670,7 @@ func entraRestore(k entraKind) entraAction {
 	return entraAction{Action{Name: "restore", Perms: perms, Capabilities: []string{"entra-delete"}},
 		func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
 			return d.entraWrite(ctx, entraWrite{tool: tool, action: "restore", kind: entraDeleted, id: in.ID, in: in.writeIn,
-				method: http.MethodPost, rels: []string{"/restore"}})
+				method: http.MethodPost, rels: []string{"/restore"}, typ: k.typ})
 		}}
 }
 
@@ -686,7 +694,11 @@ func entraObjectsDoc(col string, visible []string) []string {
 		says = append(says, "set_manager sets the user's manager to manager, remove_manager removes it (entra-objects)")
 	}
 	if slices.Contains(visible, "delete") {
-		says = append(says, "delete deletes it, with confirm, kept 30 days in deleted items (entra-delete)")
+		kept := "kept 30 days in deleted items"
+		if col == "groups" {
+			kept = "a security group for good, a Microsoft 365 group kept 30 days in deleted items"
+		}
+		says = append(says, "delete deletes it, with confirm: "+kept+" (entra-delete)")
 	}
 	if slices.Contains(visible, "restore") {
 		says = append(says, "restore brings back a deleted one by its id, from entra_api get /v1.0/directory/deletedItems/microsoft.graph."+
