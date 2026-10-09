@@ -33,15 +33,24 @@
         default = microsoft-directory-mcp;
       });
 
-      checks = forAllSystems (system: {
-        # Runs the Go test suite in checkPhase.
-        package = self.packages.${system}.microsoft-directory-mcp;
-        # Boots a VM with a Samba AD DC and a stub Graph.
-        vm = import ./tests/vm.nix {
-          inherit self;
+      checks = forAllSystems (
+        system:
+        {
+          # Runs the Go test suite in checkPhase.
+          package = self.packages.${system}.microsoft-directory-mcp;
+        }
+        // import ./tests/eval.nix {
+          inherit self lib;
           pkgs = pkgsFor system;
-        };
-      });
+        }
+        // {
+          # Boots a VM with a Samba AD DC and a stub Graph.
+          vm = import ./tests/vm.nix {
+            inherit self;
+            pkgs = pkgsFor system;
+          };
+        }
+      );
 
       formatter = forAllSystems (system: (pkgsFor system).nixfmt-tree);
 

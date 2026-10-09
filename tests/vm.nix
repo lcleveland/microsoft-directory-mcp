@@ -21,7 +21,7 @@
 #
 # One full MCP session calls ad_status (a simple bind over LDAPS, trusting
 # Samba's CA via --ad-ca-file) and entra_status (a token the stub verified).
-# Later issues add stub routes and seed data, and the hardening subtests.
+# Then the credential, argv, hardening, restart and journal-leak subtests.
 { pkgs, self }:
 
 let
@@ -1049,9 +1049,22 @@ pkgs.testers.runNixOSTest {
       services.microsoft-directory-mcp = {
         enable = true;
         logLevel = "debug";
-        extraArgs = [
-          "--capabilities"
-          "ad-account-state,ad-passwords,ad-group-membership,ad-objects,ad-delete,ad-gpo-links,ad-password-policy,entra-account-state,entra-credentials,entra-group-membership,entra-objects,entra-delete,entra-licenses,intune-device-actions,intune-retire-wipe"
+        capabilities = [
+          "ad-account-state"
+          "ad-passwords"
+          "ad-group-membership"
+          "ad-objects"
+          "ad-delete"
+          "ad-gpo-links"
+          "ad-password-policy"
+          "entra-account-state"
+          "entra-credentials"
+          "entra-group-membership"
+          "entra-objects"
+          "entra-delete"
+          "entra-licenses"
+          "intune-device-actions"
+          "intune-retire-wipe"
         ];
         http.authTokenFile = "/run/mcp-bearer";
         ad = {
@@ -1072,6 +1085,8 @@ pkgs.testers.runNixOSTest {
     };
 
   testScript = ''
+    import re
+
     machine.wait_for_unit("microsoft-directory-mcp.service", timeout=120)
     machine.wait_for_open_port(${toString mcpPort})
 
@@ -1098,13 +1113,33 @@ pkgs.testers.runNixOSTest {
             code = machine.succeed(f"curl -s -o /dev/null -w '%{{http_code}}' -X POST {h} http://127.0.0.1:${toString mcpPort}/mcp").strip()
             assert code == "401", code
 
-    with subtest("the bind password is in neither argv nor the journal"):
-        pid = machine.succeed("systemctl show -p MainPID --value microsoft-directory-mcp.service").strip()
-        machine.fail(f"tr '\\0' '\\n' < /proc/{pid}/cmdline | grep -qF '${bindPass}'")
-        journal = machine.succeed("journalctl -o cat --no-pager -u microsoft-directory-mcp.service")
-        assert "starting" in journal, journal
-        for secret in ("${bindPass}", "${httpToken}", "${accessToken}"):
-            assert secret not in journal, f"{secret} leaked into the journal"
+    with subtest("the credentials are not readable by anything else"):
+        creds = "/run/credentials/microsoft-directory-mcp.service"
+        names = ("ad-bind-password", "ad-ca", "entra-cert", "http-auth-token")
+        # systemd's layout: root-group only; the unit reads them through an ACL.
+        modes = {p: machine.succeed(f"stat -L -c %a:%G {creds}/{p}").strip() for p in ("",) + names}
+        print(modes)
+        assert modes == {"": "550:root", **{p: "440:root" for p in names}}, modes
+        for p in names:
+            machine.fail(f"runuser -u nobody -- cat {creds}/{p}")
+
+    pid = machine.succeed("systemctl show -p MainPID --value microsoft-directory-mcp.service").strip()
+
+    # A line of the key's base64 body, not its header.
+    key = machine.succeed("grep -A1 'PRIVATE KEY' /run/entra-cert.pem | tail -1").strip()
+
+    with subtest("the secrets are in neither argv nor the environment"):
+        for f in ("cmdline", "environ"):
+            for secret in ("${bindPass}", "${httpToken}", "PRIVATE KEY", key):
+                machine.fail(f"tr '\\0' '\\n' < /proc/{pid}/{f} | grep -qF '{secret}'")
+
+    with subtest("the unit is actually hardened"):
+        out = machine.succeed("systemd-analyze security microsoft-directory-mcp.service --no-pager | tail -1")
+        print(out)
+        found = re.search(r"level for \S+: ([0-9.]+)", out)
+        assert found is not None, f"could not read an exposure score from: {out}"
+        assert float(found.group(1)) < 3.0, f"unit exposure score regressed: {out}"
+        machine.fail(f"nsenter --mount --target {pid} -- test -w /etc")
 
     with subtest("the writes are in the audit log with their reasons and outcomes"):
         journal = machine.succeed("journalctl -o cat --no-pager -u microsoft-directory-mcp.service")
@@ -1167,5 +1202,22 @@ pkgs.testers.runNixOSTest {
                           "PATCH " + new, "DELETE " + new, "POST /v1.0/directory/deletedItems/00000000-0000-0000-0000-000000000110/restore"] + \
             ["POST /v1.0/users/00000000-0000-0000-0000-000000000109/assignLicense"] * 2 + \
             ["POST /v1.0/deviceManagement/managedDevices/00000000-0000-0000-0000-000000000801/syncDevice"], writes
+
+    with subtest("it comes back healthy after a restart"):
+        machine.succeed("truncate -s 0 /tmp/stub-verified")
+        since = machine.succeed("date +%s").strip()
+        machine.succeed("systemctl restart microsoft-directory-mcp.service")
+        machine.wait_for_open_port(${toString mcpPort})
+        machine.succeed("curl -fsS http://127.0.0.1:${toString mcpPort}/healthz")
+        # /healthz is static: the startup probe's fresh bind and token prove it is healthy.
+        machine.succeed("grep -qxF ${clientId} /tmp/stub-verified")
+        machine.succeed(f"journalctl -o cat --no-pager -u microsoft-directory-mcp.service --since @{since} | grep -F 'AD probe' | grep -qF bound=true")
+
+    with subtest("the journal never holds a secret or a generated password"):
+        journal = machine.succeed("journalctl -o cat --no-pager -u microsoft-directory-mcp.service")
+        assert "starting" in journal and "AD probe" in journal, journal
+        generated = [machine.succeed(f"cat /tmp/vm-{n}-password") for n in ("reset", "new", "entra", "entra-new")]
+        for secret in ["${bindPass}", "${httpToken}", "${accessToken}", key] + generated:
+            assert secret not in journal, f"{secret} leaked into the journal"
   '';
 }
