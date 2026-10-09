@@ -119,3 +119,49 @@ func TestPSOProbe(t *testing.T) {
 		}
 	}
 }
+
+// SetLink inserts, moves and flags one link; FormatGPLink writes the links
+// back last-first, as ParseGPLink reads them.
+func TestSetLink(t *testing.T) {
+	start := ParseGPLink("[LDAP://" + gpoA + ";0][LDAP://" + gpoB + ";2]") // B is link order 1
+	on, off := true, false
+	for _, tc := range []struct {
+		name              string
+		gpo               string
+		order             int
+		enforced, disable *bool
+		want              string
+		err               string
+	}{
+		{"new goes last", gpoC, 0, nil, nil, "[LDAP://" + gpoC + ";0][LDAP://" + gpoA + ";0][LDAP://" + gpoB + ";2]", ""},
+		{"new at 1, enforced", gpoC, 1, &on, nil, "[LDAP://" + gpoA + ";0][LDAP://" + gpoB + ";2][LDAP://" + gpoC + ";2]", ""},
+		{"new disabled, enforced", gpoC, 2, &on, &on, "[LDAP://" + gpoA + ";0][LDAP://" + gpoC + ";3][LDAP://" + gpoB + ";2]", ""},
+		{"existing keeps its place", strings.ToUpper(gpoA), 0, &on, nil, "[LDAP://" + gpoA + ";2][LDAP://" + gpoB + ";2]", ""},
+		{"existing moves", gpoA, 1, nil, nil, "[LDAP://" + gpoB + ";2][LDAP://" + gpoA + ";0]", ""},
+		{"existing unenforced", gpoB, 0, &off, nil, "[LDAP://" + gpoA + ";0][LDAP://" + gpoB + ";0]", ""},
+		{"order past the end", gpoC, 4, nil, nil, "", "link_order 4: want 1 to 3"},
+		{"existing past the end", gpoA, 3, nil, nil, "", "link_order 3: want 1 to 2"},
+	} {
+		got, err := SetLink(start, tc.gpo, tc.order, tc.enforced, tc.disable)
+		if tc.err != "" {
+			if err == nil || err.Error() != tc.err {
+				t.Errorf("%s: %v", tc.name, err)
+			}
+			continue
+		}
+		if err != nil || FormatGPLink(got) != tc.want {
+			t.Errorf("%s: %s %v\nwant %s", tc.name, FormatGPLink(got), err, tc.want)
+		}
+		for i, l := range got {
+			if l.LinkOrder != i+1 {
+				t.Errorf("%s: link order %+v", tc.name, got)
+			}
+		}
+	}
+	if FormatGPLink(start) != "[LDAP://"+gpoA+";0][LDAP://"+gpoB+";2]" || start[0].GPO != gpoB {
+		t.Errorf("start changed: %+v", start)
+	}
+	if FormatGPLink(nil) != "" {
+		t.Error("no links")
+	}
+}

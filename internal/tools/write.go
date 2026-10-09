@@ -116,6 +116,8 @@ var (
 	adModify    = (*ad.Client).Modify
 	adAdd       = (*ad.Client).Add
 	adProtected = (*ad.Client).Protected
+	adReaches   = (*ad.Client).Reaches
+	adGet       = (*ad.Client).Get
 )
 
 // adWrite runs w through the AD rails. Every AD write goes through here, so
@@ -246,6 +248,20 @@ func (d Deps) adAuthority(ctx context.Context, e *ldap.Entry) (*Counterpart, err
 	return c, nil
 }
 
+// swap replaces the single value old of attr, as read, with to: it deletes
+// old and adds to in one modify, so it fails rather than clobbers when
+// another writer got there first. An empty old or new is no value.
+func swap(attr, old, to string) []ldap.Change {
+	var ch []ldap.Change
+	if old != "" {
+		ch = append(ch, ldap.Change{Operation: ldap.DeleteAttribute, Modification: ldap.PartialAttribute{Type: attr, Vals: []string{old}}})
+	}
+	if to != "" {
+		ch = append(ch, ldap.Change{Operation: ldap.AddAttribute, Modification: ldap.PartialAttribute{Type: attr, Vals: []string{to}}})
+	}
+	return ch
+}
+
 // accountState is an ad-account-state action of the AD tool of k: a
 // change to one account attribute.
 func accountState(tool string, k adKind, action string) adExtra {
@@ -261,12 +277,7 @@ func accountState(tool string, k adKind, action string) adExtra {
 			if disable {
 				n |= 0x2
 			}
-			// Delete the value read, add the new one: one modify, so it fails
-			// rather than clobbers when another writer got there first.
-			return []ldap.Change{
-				{Operation: ldap.DeleteAttribute, Modification: ldap.PartialAttribute{Type: "userAccountControl", Vals: []string{old}}},
-				{Operation: ldap.AddAttribute, Modification: ldap.PartialAttribute{Type: "userAccountControl", Vals: []string{strconv.FormatUint(n, 10)}}},
-			}, nil
+			return swap("userAccountControl", old, strconv.FormatUint(n, 10)), nil
 		}
 	}
 	set := func(attr, v string) []ldap.Change {
@@ -285,7 +296,7 @@ func accountState(tool string, k adKind, action string) adExtra {
 			return set("accountExpires", v), err
 		}
 	}
-	return adExtra{Action{Name: action, Capabilities: []string{"ad-account-state"}}, func(d Deps, ctx context.Context, in adIn) (map[string]any, error) {
+	return adExtra{Action: Action{Name: action, Capabilities: []string{"ad-account-state"}}, run: func(d Deps, ctx context.Context, in adIn) (map[string]any, error) {
 		return d.adWrite(ctx, adWrite{tool: tool, action: action, id: in.ID, class: k.class, in: in.writeIn,
 			changes: func(e *ldap.Entry) ([]ldap.Change, error) { return change(e, in) }})
 	}}
@@ -294,7 +305,7 @@ func accountState(tool string, k adKind, action string) adExtra {
 // resetPassword is ad_user reset_password (ad-passwords): a generated
 // password set by replacing unicodePwd over the TLS session, with
 // must-change unless turned off. The reply is the one place it appears.
-var resetPassword = adExtra{Action{Name: "reset_password", Capabilities: []string{"ad-passwords"}}, func(d Deps, ctx context.Context, in adIn) (map[string]any, error) {
+var resetPassword = adExtra{Action: Action{Name: "reset_password", Capabilities: []string{"ad-passwords"}}, run: func(d Deps, ctx context.Context, in adIn) (map[string]any, error) {
 	var pw secret
 	must := in.MustChange == nil || *in.MustChange
 	out, err := d.adWrite(ctx, adWrite{tool: "ad_user", action: "reset_password", id: in.ID, class: adUsers.class, in: in.writeIn,
@@ -370,10 +381,10 @@ func (d Deps) membership(ctx context.Context, in adGroupIn) (map[string]any, err
 	return out, nil
 }
 
-// allowed refuses an attribute the ad-objects allowlist lacks for class.
-func allowed(class, attr string) error {
-	if !slices.ContainsFunc(adObjectAttrs[class], func(a string) bool { return strings.EqualFold(a, attr) }) {
-		return fmt.Errorf("%s is not an attribute this server sets on a %s; it sets %s", attr, class, strings.Join(adObjectAttrs[class], ", "))
+// allowed refuses an attribute that allow, the allowlist for class, lacks.
+func allowed(allow []string, class, attr string) error {
+	if !slices.ContainsFunc(allow, func(a string) bool { return strings.EqualFold(a, attr) }) {
+		return fmt.Errorf("%s is not an attribute this server sets on a %s; it sets %s", attr, class, strings.Join(allow, ", "))
 	}
 	return nil
 }
@@ -383,7 +394,8 @@ func allowed(class, attr string) error {
 // sAMAccountName sam or name (a computer's ending in $), with allowlisted
 // attributes, in one add. A user gets a generated password, returned once,
 // must change it, and is enabled; a computer gets one nobody learns (a
-// join to it resets it); a group gets groupType.
+// join to it resets it); a group gets groupType. A PSO (ad-password-policy)
+// has no sAMAccountName, and every one of its settings.
 func (d Deps) create(ctx context.Context, tool, class string, in adIn, groupType string) (map[string]any, error) {
 	reason := strings.TrimSpace(in.Reason)
 	if reason == "" {
@@ -397,10 +409,10 @@ func (d Deps) create(ctx context.Context, tool, class string, in adIn, groupType
 	}
 	dn := "CN=" + ldap.EscapeDN(in.Name) + "," + in.Parent
 	sam := cmp.Or(in.Sam, in.Name)
+	capability, allow := "ad-objects", adObjectAttrs[class]
 	audit := []any{"tool", tool, "action", "create", "target", dn, "reason", reason}
 	req := ldap.NewAddRequest(dn, nil)
 	req.Attribute("objectClass", []string{class})
-	names := []string{"objectClass", "sAMAccountName"}
 	var pw secret
 	switch class {
 	case "user":
@@ -408,38 +420,45 @@ func (d Deps) create(ctx context.Context, tool, class string, in adIn, groupType
 		req.Attribute("sAMAccountName", []string{sam})
 		if in.UPN != "" {
 			req.Attribute("userPrincipalName", []string{in.UPN})
-			names = append(names, "userPrincipalName")
 		}
 		// Enabled (NORMAL_ACCOUNT), with the password set in the same add, which must change at next logon.
 		req.Attribute("unicodePwd", []string{unicodePwd(pw)})
 		req.Attribute("userAccountControl", []string{"512"})
 		req.Attribute("pwdLastSet", []string{"0"})
-		names = append(names, "unicodePwd", "userAccountControl", "pwdLastSet")
 	case "computer":
 		sam = strings.TrimSuffix(sam, "$") + "$"
 		req.Attribute("sAMAccountName", []string{sam})
 		// WORKSTATION_TRUST_ACCOUNT, with a password rather than PASSWD_NOTREQD.
 		req.Attribute("unicodePwd", []string{unicodePwd(newPassword(0, sam))})
 		req.Attribute("userAccountControl", []string{"4096"})
-		names = append(names, "unicodePwd", "userAccountControl")
 	case "group":
 		req.Attribute("sAMAccountName", []string{sam})
 		req.Attribute("groupType", []string{groupType})
-		names = append(names, "groupType")
+	case psoClass:
+		capability, allow = "ad-password-policy", psoSettings
+		set := func(a string) bool {
+			return slices.ContainsFunc(slices.Collect(maps.Keys(in.Attributes)), func(k string) bool { return strings.EqualFold(k, a) && in.Attributes[k] != "" })
+		}
+		if missing := slices.DeleteFunc(slices.Clone(psoSettings), set); len(missing) > 0 {
+			return nil, fmt.Errorf("create needs every PSO setting in attributes; missing %s", strings.Join(missing, ", "))
+		}
 	}
 	keys := slices.Sorted(maps.Keys(in.Attributes))
 	for _, k := range keys {
-		if err := allowed(class, k); err != nil {
+		if err := allowed(allow, class, k); err != nil {
 			d.log().Warn("ad write", append(audit, "outcome", "not sent", "error", err.Error())...)
 			return nil, err
 		}
 		if v := in.Attributes[k]; v != "" {
 			req.Attribute(k, []string{v})
-			names = append(names, k)
 		}
 	}
+	var names []string
+	for _, a := range req.Attributes {
+		names = append(names, a.Type)
+	}
 	// Attribute names only: values (passwords among them) are never logged.
-	audit = append(audit, "capability", "ad-objects", "attributes", names)
+	audit = append(audit, "capability", capability, "attributes", names)
 	d.log().Info("ad write", append(audit, "outcome", "sending")...)
 	tgt, err := adAdd(d.AD, ctx, req)
 	audit = append(audit, "dc", tgt.DC, "fallback", tgt.Fallback)
@@ -449,7 +468,10 @@ func (d Deps) create(ctx context.Context, tool, class string, in adIn, groupType
 	}
 	d.log().Info("ad write", append(audit, "outcome", "ok")...)
 	out := obj(tgt)
-	out["dn"], out["action"], out["sAMAccountName"] = dn, "create", sam
+	out["dn"], out["action"] = dn, "create"
+	if class != psoClass {
+		out["sAMAccountName"] = sam
+	}
 	if class == "user" {
 		out["password"], out["must_change"] = string(pw), true
 	}
@@ -472,19 +494,29 @@ func groupType(scope string, distribution bool) (string, error) {
 // edit is ad_object edit (ad-objects): allowlisted attributes of one
 // user, group or computer replaced, an empty value clearing one.
 func (d Deps) edit(ctx context.Context, in adIn) (map[string]any, error) {
-	if len(in.Attributes) == 0 {
+	changes, err := replaces(in.Attributes)
+	if err != nil {
+		return nil, err
+	}
+	return d.adWrite(ctx, adWrite{tool: "ad_object", action: "edit", id: in.ID, class: adEditable, in: in.writeIn, raw: true,
+		changes: func(*ldap.Entry) ([]ldap.Change, error) { return changes, nil }})
+}
+
+// replaces replaces each attribute of attrs with its value, an empty one
+// clearing it, for edit.
+func replaces(attrs map[string]string) ([]ldap.Change, error) {
+	if len(attrs) == 0 {
 		return nil, errors.New("edit needs attributes")
 	}
 	var changes []ldap.Change
-	for _, k := range slices.Sorted(maps.Keys(in.Attributes)) {
+	for _, k := range slices.Sorted(maps.Keys(attrs)) {
 		var vals []string
-		if v := in.Attributes[k]; v != "" {
+		if v := attrs[k]; v != "" {
 			vals = []string{v}
 		}
 		changes = append(changes, ldap.Change{Operation: ldap.ReplaceAttribute, Modification: ldap.PartialAttribute{Type: k, Vals: vals}})
 	}
-	return d.adWrite(ctx, adWrite{tool: "ad_object", action: "edit", id: in.ID, class: adEditable, in: in.writeIn, raw: true,
-		changes: func(*ldap.Entry) ([]ldap.Change, error) { return changes, nil }})
+	return changes, nil
 }
 
 // moveOrRename is ad_object rename (a new name, same parent) or move (a

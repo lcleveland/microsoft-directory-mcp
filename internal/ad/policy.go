@@ -1,7 +1,9 @@
 package ad
 
 import (
+	"cmp"
 	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -37,6 +39,49 @@ func ParseGPLink(s string) []Link {
 		out[i].LinkOrder = i + 1
 	}
 	return out
+}
+
+// FormatGPLink writes links, in link order, as a gPLink value: last-first.
+func FormatGPLink(links []Link) string {
+	var b strings.Builder
+	for _, l := range slices.Backward(links) {
+		n := 0
+		if l.Disabled {
+			n |= 1
+		}
+		if l.Enforced {
+			n |= 2
+		}
+		fmt.Fprintf(&b, "[LDAP://%s;%d]", l.GPO, n)
+	}
+	return b.String()
+}
+
+// SetLink puts gpo's link at link order order (0: where it is, or last when
+// it is new), setting enforced and disabled unless nil, and renumbers.
+func SetLink(links []Link, gpo string, order int, enforced, disabled *bool) ([]Link, error) {
+	links = slices.Clone(links)
+	l := Link{GPO: gpo}
+	if i := slices.IndexFunc(links, func(l Link) bool { return strings.EqualFold(l.GPO, gpo) }); i >= 0 {
+		l = links[i]
+		links = slices.Delete(links, i, i+1)
+		order = cmp.Or(order, i+1)
+	}
+	order = cmp.Or(order, len(links)+1)
+	if order < 1 || order > len(links)+1 {
+		return nil, fmt.Errorf("link_order %d: want 1 to %d", order, len(links)+1)
+	}
+	if enforced != nil {
+		l.Enforced = *enforced
+	}
+	if disabled != nil {
+		l.Disabled = *disabled
+	}
+	links = slices.Insert(links, order-1, l)
+	for i := range links {
+		links[i].LinkOrder = i + 1
+	}
+	return links, nil
 }
 
 // SOM is a container GPOs link to (a domain, OU or site), with its links
