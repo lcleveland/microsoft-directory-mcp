@@ -5,7 +5,7 @@ The Entra side talks to Microsoft Graph through a small stdlib `net/http` client
 ## Consequences
 
 - The client owns everything the SDK would have done:
-  - app-only token caching, with refresh before expiry and one re-fetch on a 401;
+  - app-only token caching, with refresh before expiry and one re-fetch on a 401. The call is then re-sent once, writes included: the one exception to never retrying a write, safe because Graph rejects a 401 before it processes the call;
   - the certificate-assertion JWT (PS256, `x5t#S256`), built with the stdlib from a PEM key;
   - following `@odata.nextLink` verbatim;
   - re-sending `ConsistencyLevel: eventual` on every page;
