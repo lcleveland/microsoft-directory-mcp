@@ -27,6 +27,7 @@ func Register(s *mcp.Server, d Deps) int {
 	n := 0
 	if d.AD != nil {
 		registerADStatus(s, d)
+		registerADGuides(s)
 		n++
 	}
 	if d.Graph != nil {

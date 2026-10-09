@@ -36,9 +36,12 @@ type Client struct {
 	loadMu  sync.Mutex
 	domains []Domain // from the crossRefs, once read
 
-	mu     sync.Mutex
-	pool   map[string]pooled   // domain DN, or "" for the GC
-	static map[string]staticDC // --ad-dc host to its detected roles
+	mu      sync.Mutex
+	pool    map[string]pooled   // domain DN, or "" for the GC
+	static  map[string]staticDC // --ad-dc host to its detected roles
+	cursors map[string]*paged   // paged searches in progress, by cursor
+
+	now func() time.Time // a seam for cursor expiry tests
 }
 
 type pooled struct {
@@ -61,7 +64,8 @@ func New(cfg *config.AD, timeout time.Duration) (*Client, error) {
 			return nil, fmt.Errorf("--ad-ca-file %s: no PEM certificates", cfg.CAFile)
 		}
 	}
-	c := &Client{cfg: cfg, roots: roots, timeout: timeout, pool: map[string]pooled{}, static: map[string]staticDC{}}
+	c := &Client{cfg: cfg, roots: roots, timeout: timeout, pool: map[string]pooled{}, static: map[string]staticDC{},
+		cursors: map[string]*paged{}, now: time.Now}
 	c.dial = c.dialTLS
 	c.lookupSRV = func(ctx context.Context, name string) ([]*net.SRV, error) {
 		_, srv, err := net.DefaultResolver.LookupSRV(ctx, "", "", name)

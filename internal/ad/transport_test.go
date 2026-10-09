@@ -25,13 +25,14 @@ const (
 )
 
 type fakeDir struct {
-	mu    sync.Mutex
-	dead  map[string]bool // host
-	busy  map[string]bool // host refusing new connections; open ones keep working
-	dials []string        // addrs
-	srv   map[string][]string
-	tree  map[string]map[string][]string // lowercased DN to attributes
-	roots map[string]map[string][]string // host to rootDSE
+	mu       sync.Mutex
+	dead     map[string]bool // host
+	busy     map[string]bool // host refusing new connections; open ones keep working
+	dials    []string        // addrs
+	searches []string        // "host base filter"
+	srv      map[string][]string
+	tree     map[string]map[string][]string // lowercased DN to attributes
+	roots    map[string]map[string][]string // host to rootDSE
 }
 
 func ntds(dc string) string { return "CN=NTDS Settings,CN=" + strings.ToUpper(dc) + "," + sites }
@@ -47,8 +48,8 @@ func newFakeDir() *fakeDir {
 			"_gc._tcp.Site1._sites.corp.example.com":         {"dc1.corp.example.com"},
 		}}
 	add := func(dn string, attrs map[string][]string) { f.tree[strings.ToLower(dn)] = attrs }
-	add("CN=CORP,CN=Partitions,"+confDN, map[string][]string{"dnsRoot": {"corp.example.com"}, "nETBIOSName": {"CORP"}, "nCName": {corpDN}})
-	add("CN=CHILD,CN=Partitions,"+confDN, map[string][]string{"dnsRoot": {"child.corp.example.com"}, "nETBIOSName": {"CHILD"}, "nCName": {childDN}})
+	add("CN=CORP,CN=Partitions,"+confDN, map[string][]string{"dnsRoot": {"corp.example.com"}, "nETBIOSName": {"CORP"}, "nCName": {corpDN}, "systemFlags": {"3"}, "objectClass": {"crossRef"}})
+	add("CN=CHILD,CN=Partitions,"+confDN, map[string][]string{"dnsRoot": {"child.corp.example.com"}, "nETBIOSName": {"CHILD"}, "nCName": {childDN}, "systemFlags": {"3"}, "objectClass": {"crossRef"}})
 	add(corpDN, map[string][]string{"fSMORoleOwner": {ntds("dc2")}})
 	add(childDN, map[string][]string{"fSMORoleOwner": {ntds("dc3")}})
 	for dc, d := range map[string]string{"dc1": "corp.example.com", "dc2": "corp.example.com", "dc3": "child.corp.example.com", "dc4": "child.corp.example.com"} {
@@ -81,7 +82,7 @@ func (f *fakeDir) client(cfg *config.AD) *Client {
 		if f.dead[host] || f.busy[host] {
 			return nil, errors.New("connecting to " + addr + ": connection refused")
 		}
-		return &fakeConn{f: f, host: host}, nil
+		return &fakeConn{f: f, host: host, addr: addr}, nil
 	}
 	c.lookupSRV = func(_ context.Context, name string) ([]*net.SRV, error) {
 		hosts, ok := f.srv[name]
@@ -106,34 +107,13 @@ func (f *fakeDir) kill(hosts ...string) {
 type fakeConn struct {
 	f      *fakeDir
 	host   string
+	addr   string
 	closed bool
 }
 
 func (c *fakeConn) IsClosing() bool          { return c.closed || c.f.dead[c.host] }
 func (c *fakeConn) Close() error             { c.closed = true; return nil }
 func (c *fakeConn) SetTimeout(time.Duration) {}
-
-func (c *fakeConn) Search(req *ldap.SearchRequest) (*ldap.SearchResult, error) {
-	if c.IsClosing() {
-		return nil, ldap.NewError(ldap.ErrorNetwork, errors.New("connection closed"))
-	}
-	res := &ldap.SearchResult{}
-	if req.BaseDN == "" {
-		res.Entries = append(res.Entries, ldap.NewEntry("", c.f.roots[c.host]))
-		return res, nil
-	}
-	base := strings.ToLower(req.BaseDN)
-	for dn, attrs := range c.f.tree {
-		_, parent, _ := strings.Cut(dn, ",")
-		if (req.Scope == ldap.ScopeBaseObject && dn == base) || (req.Scope == ldap.ScopeSingleLevel && parent == base) {
-			res.Entries = append(res.Entries, ldap.NewEntry(dn, attrs))
-		}
-	}
-	if req.Scope == ldap.ScopeBaseObject && len(res.Entries) == 0 {
-		return nil, ldap.NewError(ldap.LDAPResultNoSuchObject, errors.New("no such object"))
-	}
-	return res, nil
-}
 
 func srvConfig() *config.AD { return &config.AD{Forest: "corp.example.com", TLS: "ldaps"} }
 

@@ -34,6 +34,32 @@ let
   # {"aud":"https://graph.microsoft.com","roles":["Organization.Read.All","User.Read.All","LicenseAssignment.Read.All"]}
   accessToken = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJhdWQiOiJodHRwczovL2dyYXBoLm1pY3Jvc29mdC5jb20iLCJyb2xlcyI6WyJPcmdhbml6YXRpb24uUmVhZC5BbGwiLCJVc2VyLlJlYWQuQWxsIiwiTGljZW5zZUFzc2lnbm1lbnQuUmVhZC5BbGwiXX0.stub";
 
+  # Seed data, ldbadd-ed into sam.ldb at provisioning: 250 users (more than
+  # one page), vm-team with five users and the nested vm-sub (two more).
+  base = "DC=corp,DC=example,DC=com";
+  userDN = n: "CN=vmuser${lib.fixedWidthNumber 3 n},CN=Users,${base}";
+  seedLdif = pkgs.writeText "seed.ldif" (
+    lib.concatMapStrings (n: ''
+      dn: ${userDN n}
+      objectClass: user
+      sAMAccountName: vmuser${lib.fixedWidthNumber 3 n}
+      userPrincipalName: vmuser${lib.fixedWidthNumber 3 n}@corp.example.com
+
+    '') (lib.range 1 250)
+    + ''
+      dn: CN=vm-sub,CN=Users,${base}
+      objectClass: group
+      sAMAccountName: vm-sub
+      member: ${userDN 6}
+      member: ${userDN 7}
+
+      dn: CN=vm-team,CN=Users,${base}
+      objectClass: group
+      sAMAccountName: vm-team
+      ${lib.concatMapStrings (n: "member: ${userDN n}\n") (lib.range 1 5)}member: CN=vm-sub,CN=Users,${base}
+    ''
+  );
+
   # Routes are (method, path) -> handler; later issues add to ROUTES and SEED.
   stub = pkgs.writers.writePython3Bin "stub-graph" { flakeIgnore = [ "E501" ]; } ''
     import base64
@@ -240,7 +266,7 @@ let
 
     _, listed = post({"jsonrpc": "2.0", "id": next(ids), "method": "tools/list"}, session)
     tools = sorted(t["name"] for t in listed["result"]["tools"])
-    assert tools == ["ad_status", "entra_status"], tools
+    assert tools == ["ad_api", "ad_computer", "ad_group", "ad_object", "ad_status", "ad_user", "entra_status"], tools
 
     ad = call("ad_status", {})
     print("ad_status", json.dumps(ad))
@@ -267,6 +293,43 @@ let
     assert entra["password_writeback"] == {"value": "unknown", "source": "operator-declared"}, entra
     assert ad["probe"]["bound"], ad
     assert {"dns": "corp.example.com", "netbios": "CORP", "dn": "DC=corp,DC=example,DC=com"} in ad["probe"]["domains"], ad
+
+    # ad_user search across a cursor: the 250 seeded users.
+    page = call("ad_user", {"action": "search", "filter": "(sAMAccountName=vmuser*)"})
+    assert len(page["results"]) == 200 and page.get("next_cursor"), {k: v for k, v in page.items() if k != "results"}
+    brief = {"dn", "sAMAccountName", "userPrincipalName", "displayName", "mail", "enabled", "objectSid", "lastLogonTimestamp", "whenCreated"}
+    assert set(page["results"][0]) <= brief, page["results"][0]
+    rest = call("ad_user", {"action": "search", "filter": "(sAMAccountName=vmuser*)", "cursor": page["next_cursor"]})
+    assert len(rest["results"]) == 50 and "next_cursor" not in rest, rest
+    names = {r["sAMAccountName"] for r in page["results"] + rest["results"]}
+    assert len(names) == 250, len(names)
+    found = call("ad_user", {"action": "search", "query": "vmuser042"})
+    assert [r["sAMAccountName"] for r in found["results"]] == ["vmuser042"], found
+
+    # Gets resolved on the GC: by UPN, then by the SID that returned.
+    by_upn = call("ad_user", {"action": "get", "id": "vmuser042@corp.example.com"})
+    print("ad_user get", json.dumps(by_upn))
+    assert by_upn["dn"].lower() == "${lib.toLower (userDN 42)}", by_upn
+    assert by_upn["objectSid"].startswith("S-1-5-21-") and "userAccountControl" in by_upn and "whenChanged" in by_upn, by_upn
+    by_sid = call("ad_user", {"action": "get", "id": by_upn["objectSid"]})
+    assert by_sid["dn"] == by_upn["dn"], by_sid
+    by_sam = call("ad_user", {"action": "get", "id": "CORP\\vmuser042", "fields": ["objectGUID"]})
+    assert by_sam["dn"] == by_upn["dn"] and set(by_sam) == {"dn", "objectGUID"}, by_sam
+    assert call("ad_object", {"action": "get", "id": by_sam["objectGUID"]})["dn"] == by_upn["dn"]
+
+    # Groups: a member count, direct members (one nested group), transitive members.
+    team = call("ad_group", {"action": "get", "id": "vm-team"})
+    assert team["memberCount"] == 6 and team["groupType"] == {"scope": "global", "type": "security"}, team
+    direct = call("ad_group", {"action": "members", "id": "vm-team"})
+    assert sorted(m.get("sAMAccountName") for m in direct["results"]) == ["vm-sub"] + ["vmuser00%d" % i for i in range(1, 6)], direct
+    assert "next_cursor" not in direct, direct
+    nested = call("ad_group", {"action": "members", "id": "vm-team", "transitive": True})
+    assert sorted(m.get("sAMAccountName") for m in nested["results"]) == ["vm-sub"] + ["vmuser00%d" % i for i in range(1, 8)], nested
+
+    # ad_api: a raw one-level search of the configuration partition.
+    raw = call("ad_api", {"action": "search", "base": "CN=Partitions,CN=Configuration,${base}", "scope": "one",
+                          "filter": "(objectClass=crossRef)", "attributes": ["nCName", "nETBIOSName"]})
+    assert {"dn": "CN=CORP,CN=Partitions,CN=Configuration,${base}", "nCName": "${base}", "nETBIOSName": "CORP"} in raw["results"], raw
     print("ok")
   '';
 
@@ -310,6 +373,7 @@ pkgs.testers.runNixOSTest {
             # provision --option does not persist this; the old password must stop binding at once.
             sed -i '/\[global\]/a old password allowed period = 0' ${smbConf}
             samba-tool user create ${bindUser} '${bindPass}' -s ${smbConf}
+            ldbadd -H /var/lib/samba-dc/private/sam.ldb ${seedLdif}
           fi
         '';
         serviceConfig = {
@@ -332,11 +396,12 @@ pkgs.testers.runNixOSTest {
         serviceConfig.RemainAfterExit = true;
         script = ''
           ca=/var/lib/samba-dc/private/tls/ca.pem
-          # Non-empty is not enough: samba may still be writing it, and a
-          # half-written CA restart-loops the server forever.
-          until ${lib.getExe pkgs.openssl} x509 -in $ca -noout 2>/dev/null \
-            && ${pkgs.netcat}/bin/nc -z 127.0.0.1 636; do sleep 0.5; done
-          install -m 0444 $ca /run/samba-ca.pem.tmp
+          # Validate the copy, not the source: samba may still be rewriting
+          # it, and a half-written CA restart-loops the server forever. The
+          # copy is good once LDAPS verifies against it.
+          until install -m 0444 $ca /run/samba-ca.pem.tmp 2>/dev/null \
+            && ${lib.getExe pkgs.openssl} s_client -connect 127.0.0.1:636 -CAfile /run/samba-ca.pem.tmp \
+              -verify_return_error </dev/null >/dev/null 2>&1; do sleep 0.5; done
           mv /run/samba-ca.pem.tmp /run/samba-ca.pem
         '';
       };
