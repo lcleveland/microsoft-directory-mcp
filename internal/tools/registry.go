@@ -1,7 +1,10 @@
 package tools
 
 import (
+	"cmp"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -151,7 +154,13 @@ func addActionTool[In interface{ action() string }, Out any](s *mcp.Server, d De
 		def.Annotations = &ann
 	}
 	def.InputSchema = schema
-	mcp.AddTool(s, def, func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, Out, error) {
+	mcp.AddTool(s, def, func(ctx context.Context, req *mcp.CallToolRequest, in In) (_ *mcp.CallToolResult, _ Out, err error) {
+		defer func() {
+			if err != nil && slices.ContainsFunc(t.Actions, func(a Action) bool { return a.Name == in.action() && len(a.Capabilities) > 0 }) &&
+				!errors.As(err, new(audited)) {
+				d.refused(t.Name, in.action(), in, err)
+			}
+		}()
 		if !slices.Contains(visible, in.action()) {
 			var zero Out
 			for _, a := range t.Actions {
@@ -170,6 +179,17 @@ func addActionTool[In interface{ action() string }, Out any](s *mcp.Server, d De
 		}
 		return h(ctx, req, in)
 	})
+}
+
+// refused logs a write refused before the rails logged it: its target as
+// given (id, dn or path) and reason, never other inputs.
+func (d Deps) refused(tool, action string, in any, err error) {
+	var f struct{ ID, DN, Path, UPN, Name, Reason string }
+	b, _ := json.Marshal(in)
+	_ = json.Unmarshal(b, &f)
+	side, _, _ := strings.Cut(tool, "_")
+	d.log().Warn(side+" write", "tool", tool, "action", action, "target", cmp.Or(f.ID, f.DN, f.Path, f.UPN, f.Name),
+		"reason", strings.TrimSpace(f.Reason), "outcome", "refused: "+err.Error())
 }
 
 // Visibility is what the *_status tools report about one side.

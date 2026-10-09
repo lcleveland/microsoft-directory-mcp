@@ -916,3 +916,60 @@ func TestPolicyWritesRegister(t *testing.T) {
 		}
 	}
 }
+
+// A write refused before the rails log it still leaves one audit line, as
+// a refusal; one the rails logged is not logged twice.
+func TestRefusedWritesAudited(t *testing.T) {
+	g, _ := graphStub(t, entraWriteStub(""))
+	cfg := &config.Config{ToolGroups: map[string]bool{}, Entra: &config.Entra{Cloud: "global"},
+		AD:           &config.AD{TLS: "ldaps", DCs: []string{"127.0.0.1:1"}},
+		Capabilities: map[string]bool{"ad-objects": true, "entra-objects": true}}
+	for _, grp := range config.Groups {
+		cfg.ToolGroups[grp] = true
+	}
+	a, err := ad.New(cfg.AD, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := &bytes.Buffer{}
+	s := mcp.NewServer(&mcp.Implementation{Name: "t"}, nil)
+	Register(s, Deps{Config: cfg, AD: a, Graph: g, Log: slog.New(slog.NewTextHandler(buf, nil))})
+	st, ct := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	if _, err := s.Connect(ctx, st, nil); err != nil {
+		t.Fatal(err)
+	}
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "c"}, nil).Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cs.Close() })
+
+	for _, tc := range []struct {
+		tool string
+		args map[string]any
+		want []string
+	}{
+		{"ad_api", map[string]any{"action": "add", "dn": "CN=x,DC=example,DC=com", "reason": "probe"},
+			[]string{`msg="ad write"`, "tool=ad_api", "action=add", `target="CN=x,DC=example,DC=com"`, "reason=probe", `outcome="refused: `}},
+		{"entra_api", map[string]any{"action": "post", "path": "/v1.0/roleManagement/directory/roleAssignments", "reason": "probe"},
+			[]string{`msg="entra write"`, "tool=entra_api", "action=post", "target=/v1.0/roleManagement/directory/roleAssignments", "reason=probe", `outcome="refused: `}},
+		// Refused inside the rails: logged there as not sent, not again here.
+		{"entra_api", map[string]any{"action": "patch", "path": "/v1.0/users/" + u1, "reason": "probe", "body": map[string]any{"accountEnabled": false}},
+			[]string{`outcome="not sent"`}},
+	} {
+		buf.Reset()
+		if _, isErr := call(t, cs, tc.tool, tc.args); !isErr {
+			t.Fatalf("%s %v was not refused", tc.tool, tc.args)
+		}
+		log := buf.String()
+		if n := strings.Count(log, "\n"); n != 1 {
+			t.Errorf("%s %v: want one audit line, got %d:\n%s", tc.tool, tc.args["action"], n, log)
+		}
+		for _, w := range tc.want {
+			if !strings.Contains(log, w) {
+				t.Errorf("%s %v: audit log lacks %s:\n%s", tc.tool, tc.args["action"], w, log)
+			}
+		}
+	}
+}
