@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -18,9 +19,9 @@ import (
 	"github.com/lcleveland/microsoft-directory-mcp/internal/graph"
 )
 
-// entraSession registers the real Entra roster under probe against a Graph
-// stub answering every call with reply, and returns the requests it saw.
-func entraSession(t *testing.T, probe *graph.Probe, reply func(r *http.Request) string) (*mcp.ClientSession, func() []*http.Request) {
+// graphStub is a Graph client against a stub answering every call with
+// reply, and the requests the stub saw.
+func graphStub(t *testing.T, reply func(r *http.Request) string) (*graph.Client, func() []*http.Request) {
 	t.Helper()
 	var mu sync.Mutex
 	var seen []*http.Request
@@ -33,12 +34,14 @@ func entraSession(t *testing.T, probe *graph.Probe, reply func(r *http.Request) 
 		seen = append(seen, r)
 		mu.Unlock()
 		body := reply(r)
-		// "403" answers Authorization_RequestDenied, "403 Code" that code.
-		if code, ok := strings.CutPrefix(body, "403"); ok {
-			if code = strings.TrimSpace(code); code == "" {
-				code = "Authorization_RequestDenied"
+		// "403" answers Authorization_RequestDenied, "403 Code" that code;
+		// another status alone answers that status.
+		if st, code, _ := strings.Cut(body, " "); len(st) == 3 && st[0] >= '4' && st[0] <= '5' {
+			if code == "" {
+				code = map[string]string{"403": "Authorization_RequestDenied"}[st]
 			}
-			w.WriteHeader(http.StatusForbidden)
+			n, _ := strconv.Atoi(st)
+			w.WriteHeader(n)
 			body = `{"error":{"code":"` + code + `","message":"no"}}`
 		}
 		io.WriteString(w, body)
@@ -52,6 +55,14 @@ func entraSession(t *testing.T, probe *graph.Probe, reply func(r *http.Request) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	return g, func() []*http.Request { mu.Lock(); defer mu.Unlock(); return slices.Clone(seen) }
+}
+
+// entraSession registers the real Entra roster under probe against a Graph
+// stub answering every call with reply, and returns the requests it saw.
+func entraSession(t *testing.T, probe *graph.Probe, reply func(r *http.Request) string) (*mcp.ClientSession, func() []*http.Request) {
+	t.Helper()
+	g, seen := graphStub(t, reply)
 	cfg := &config.Config{ToolGroups: map[string]bool{}, Entra: &config.Entra{Cloud: "global"}}
 	for _, grp := range config.Groups {
 		cfg.ToolGroups[grp] = true
@@ -68,7 +79,7 @@ func entraSession(t *testing.T, probe *graph.Probe, reply func(r *http.Request) 
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { cs.Close() })
-	return cs, func() []*http.Request { mu.Lock(); defer mu.Unlock(); return slices.Clone(seen) }
+	return cs, seen
 }
 
 func call(t *testing.T, cs *mcp.ClientSession, name string, args map[string]any) (map[string]any, bool) {
@@ -134,7 +145,7 @@ func TestUserGetSelectsFieldSets(t *testing.T) {
 			t.Errorf("request %s", r.URL)
 		}
 		sel := strings.Split(r.URL.Query().Get("$select"), ",")
-		want := append(slices.Clone(entraUsers.brief), "onPremisesSamAccountName", "onPremisesLastSyncDateTime", "jobTitle",
+		want := append(slices.Clone(entraUsers.brief), "onPremisesSamAccountName", "onPremisesSecurityIdentifier", "onPremisesLastSyncDateTime", "jobTitle",
 			"department", "assignedLicenses", "lastPasswordChangeDateTime")
 		if tc.signIn {
 			want = append(want, "signInActivity")

@@ -10,7 +10,9 @@
 #                            /users in two nextLink pages, the second 429 once;
 #                            a user by id or UPN, a group's members, /devices,
 #                            /beta/organization, apps and SPs with credentials, and
-#                            directory audit events (activityDisplayName filters)
+#                            directory audit events (activityDisplayName filters);
+#                            a synced user whose SID is vmuser042's, read from
+#                            /var/lib/samba-dc/vm-synced-sid (onPremisesSyncBehavior refused: 403)
 #   microsoft-directory-mcp  the module's HTTP service
 #
 # One full MCP session calls ad_status (a simple bind over LDAPS, trusting
@@ -37,6 +39,8 @@ let
   openssl = lib.getExe pkgs.openssl;
   # The certificate half of the Entra fixture, readable by the stub.
   certPublic = "/run/entra-cert-public.pem";
+  # vmuser042's objectSid, written at provisioning for the stub's synced user.
+  syncedSid = "/var/lib/samba-dc/vm-synced-sid";
   # An unsigned JWT the server decodes for the startup probe. Payload:
   # {"aud":"https://graph.microsoft.com","roles":["Organization.Read.All","User.Read.All","LicenseAssignment.Read.All","GroupMember.Read.All","Device.Read.All","Application.Read.All","AuditLog.Read.All"]}
   accessToken = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJhdWQiOiJodHRwczovL2dyYXBoLm1pY3Jvc29mdC5jb20iLCJyb2xlcyI6WyJPcmdhbml6YXRpb24uUmVhZC5BbGwiLCJVc2VyLlJlYWQuQWxsIiwiTGljZW5zZUFzc2lnbm1lbnQuUmVhZC5BbGwiLCJHcm91cE1lbWJlci5SZWFkLkFsbCIsIkRldmljZS5SZWFkLkFsbCIsIkFwcGxpY2F0aW9uLlJlYWQuQWxsIiwiQXVkaXRMb2cuUmVhZC5BbGwiXX0.stub";
@@ -78,7 +82,9 @@ let
       dn: CN=vm-team,CN=Users,${base}
       objectClass: group
       sAMAccountName: vm-team
-      ${lib.concatMapStrings (n: "member: ${userDN n}\n") (lib.range 1 5)}member: CN=vm-sub,CN=Users,${base}
+      ${
+        lib.concatMapStrings (n: "member: ${userDN n}\n") (lib.range 1 5)
+      }member: CN=vm-sub,CN=Users,${base}
 
     ''
     + gpo gpoA "vm-gpo-a" 0
@@ -117,6 +123,7 @@ let
     TOKEN_PATH = "/" + TENANT + "/oauth2/v2.0/token"
     TOKEN_URL = "http://127.0.0.1:%d%s" % (PORT, TOKEN_PATH)
     ACCESS_TOKEN = ${builtins.toJSON accessToken}
+    SYNCED_SID = ${builtins.toJSON syncedSid}
 
     SEED = {
         "organization": [{
@@ -137,6 +144,7 @@ let
             }],
         }],
         "managedDevices": [],
+        "groups": [],
         # Two pages of two and one, the second answered 429 once.
         "users": [{"@odata.type": "#microsoft.graph.user",
                    "id": "00000000-0000-0000-0000-00000000010%d" % n,
@@ -172,6 +180,17 @@ let
          "result": "success", "initiatedBy": {"user": {"userPrincipalName": "admin@example.com"}},
          "targetResources": [{"id": "00000000-0000-0000-0000-000000000101", "displayName": "Entra User 1", "modifiedProperties": []}]},
     ]
+
+
+    def synced():
+        """The synced user, linked to vmuser042 by SID (read once Samba has provisioned)."""
+        with open(SYNCED_SID) as fh:
+            sid = fh.read().strip()
+        return {"@odata.type": "#microsoft.graph.user", "id": "00000000-0000-0000-0000-000000000109",
+                "displayName": "Synced User", "userPrincipalName": "synced-user@example.com", "accountEnabled": True,
+                "onPremisesSyncEnabled": True, "onPremisesSecurityIdentifier": sid}
+
+
     # A group of user 1 and the device.
     SEED["members"] = {"00000000-0000-0000-0000-000000000401": [SEED["users"][0], SEED["devices"][0]]}
     THROTTLED = set()
@@ -242,7 +261,24 @@ let
         return lambda h, query: h.reply(200, {"value": SEED[name]})
 
 
+    def sid_filter(query):
+        """The SID of an onPremisesSecurityIdentifier eq filter, or None."""
+        m = re.fullmatch(r"onPremisesSecurityIdentifier eq '([^']*)'", query.get("$filter", [""])[0])
+        return m and m.group(1)
+
+
+    def by_sid(name):
+        """Lists name, or only its objects with the filter's SID."""
+        def handler(h, query):
+            objs = SEED[name] + ([synced()] if name == "users" else [])
+            sid = sid_filter(query)
+            h.reply(200, {"value": [o for o in objs if sid is None or o.get("onPremisesSecurityIdentifier") == sid]})
+        return handler
+
+
     def users(h, query):
+        if sid_filter(query):
+            return by_sid("users")(h, query)
         if query.get("$skiptoken") != ["p2"]:
             return h.reply(200, {"value": SEED["users"][:2],
                                  "@odata.nextLink": "http://127.0.0.1:%d/v1.0/users?$skiptoken=p2" % PORT})
@@ -254,7 +290,7 @@ let
 
 
     def user(h, query, key):
-        for u in SEED["users"]:
+        for u in SEED["users"] + [synced()]:
             if urllib.parse.unquote(key) in (u["id"], u["userPrincipalName"]):
                 return h.reply(200, u)
         h.error(404, "Request_ResourceNotFound", key)
@@ -272,6 +308,10 @@ let
         h.reply(200, {"value": [e for e in SEED["directoryAudits"] if not f or "'" + e["activityDisplayName"] + "'" in f]})
 
 
+    def no_grant(h, query, key):
+        h.error(403, "Authorization_RequestDenied", "Insufficient privileges to complete the operation.")
+
+
     def no_premium(h, query):
         h.error(403, "Authentication_RequestFromNonPremiumTenantOrB2CTenant",
                 "Neither tenant is B2C or tenant doesn't have premium license")
@@ -285,7 +325,8 @@ let
         ("GET", "/v1.0/auditLogs/signIns"): no_premium,
         ("GET", "/v1.0/auditLogs/directoryAudits"): audits,
         ("GET", "/v1.0/users"): users,
-        ("GET", "/v1.0/devices"): listing("devices"),
+        ("GET", "/v1.0/devices"): by_sid("devices"),
+        ("GET", "/v1.0/groups"): by_sid("groups"),
         ("GET", "/v1.0/applications"): listing("applications"),
         ("GET", "/v1.0/servicePrincipals"): listing("servicePrincipals"),
         ("GET", "/beta/organization"): organization,
@@ -294,6 +335,7 @@ let
     PATTERNS = [
         ("GET", re.compile(r"/v1\.0/users/([^/]+)"), user),
         ("GET", re.compile(r"/v1\.0/groups/([^/]+)/members"), group_members),
+        ("GET", re.compile(r"/v1\.0/(users|groups)/[^/]+/onPremisesSyncBehavior"), no_grant),
     ]
     UNAUTHENTICATED = {TOKEN_PATH}
 
@@ -447,6 +489,17 @@ let
     assert by_sam["dn"] == by_upn["dn"] and set(by_sam) == {"dn", "objectGUID"}, by_sam
     assert call("ad_object", {"action": "get", "id": by_sam["objectGUID"]})["dn"] == by_upn["dn"]
 
+    # Counterparts by SID: vmuser042 is the stub's synced user, owned by the forest
+    # (onPremisesSyncBehavior is refused, so onPremisesSyncEnabled says so).
+    synced = {"id": "00000000-0000-0000-0000-000000000109", "source_of_authority": "forest", "source": "onPremisesSyncEnabled"}
+    assert by_upn["counterpart"] == synced, by_upn
+    assert "counterpart" not in by_sam, by_sam
+    su = call("entra_user", {"action": "get", "id": synced["id"]})
+    print("entra_user get synced", json.dumps(su))
+    assert su["onPremisesSecurityIdentifier"] == by_upn["objectSid"], su
+    assert su["counterpart"] == dict(synced, id=by_upn["dn"]), su
+    assert call("ad_user", {"action": "get", "id": "vmuser043"})["counterpart"] == {"source_of_authority": "forest", "source": "no Entra object has its SID"}
+
     # Groups: a member count, direct members (one nested group), transitive members.
     team = call("ad_group", {"action": "get", "id": "vm-team"})
     assert team["memberCount"] == 6 and team["groupType"] == {"scope": "global", "type": "security"}, team
@@ -531,6 +584,7 @@ let
     assert eu["id"] == "00000000-0000-0000-0000-000000000102", eu
     assert eu["assignedLicenses"] == [{"skuId": "00000000-0000-0000-0000-0000000000c1", "skuPartNumber": "EXCHANGESTANDARD"}], eu
     assert "signInActivity" in eu["_omitted"], eu
+    assert eu["counterpart"] == {"source_of_authority": "tenant", "source": "cloud-only: no onPremisesSecurityIdentifier"}, eu
     members = call("entra_group", {"action": "members", "id": "00000000-0000-0000-0000-000000000401"})["results"]
     assert [(m["@odata.type"], m.get("userPrincipalName"), m.get("deviceId")) for m in members] == [
         ("#microsoft.graph.user", "entra-user1@example.com", None),
@@ -613,6 +667,9 @@ pkgs.testers.runNixOSTest {
             sed -i '/\[global\]/a tls keyfile = ${tlsDir}/key.pem\n\ttls certfile = ${tlsDir}/cert.pem\n\ttls cafile = ${tlsDir}/ca.pem' ${smbConf}
             samba-tool user create ${bindUser} '${bindPass}' -s ${smbConf}
             ldbadd -H /var/lib/samba-dc/private/sam.ldb ${seedLdif}
+            ldbsearch -H /var/lib/samba-dc/private/sam.ldb '(sAMAccountName=vmuser042)' objectSid \
+              | sed -n 's/^objectSid: //p' > ${syncedSid}
+            grep -q '^S-1-5-21-' ${syncedSid}
             # PSOs are unreadable to the bind account by default; delegate it first so vm-pso inherits it.
             samba-tool dsacl set -H /var/lib/samba-dc/private/sam.ldb -s ${smbConf} \
               --objectdn='CN=Password Settings Container,CN=System,${base}' --sddl='(A;CI;RPLCLORC;;;AU)'

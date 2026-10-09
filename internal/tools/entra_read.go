@@ -35,13 +35,13 @@ func (k entraKind) curated(more ...string) entraKind {
 var (
 	entraUsers = entraKind{path: "/v1.0/users", upnOK: true, searchable: true, typ: "#microsoft.graph.user", expand: "manager($select=id,displayName)",
 		brief: []string{"id", "userPrincipalName", "displayName", "mail", "accountEnabled", "onPremisesSyncEnabled", "userType", "createdDateTime"},
-	}.curated("onPremisesSamAccountName", "onPremisesLastSyncDateTime", "jobTitle", "department", "assignedLicenses", "signInActivity", "lastPasswordChangeDateTime")
+	}.curated("onPremisesSamAccountName", "onPremisesSecurityIdentifier", "onPremisesLastSyncDateTime", "jobTitle", "department", "assignedLicenses", "signInActivity", "lastPasswordChangeDateTime")
 	entraGroups = entraKind{path: "/v1.0/groups", searchable: true, typ: "#microsoft.graph.group",
 		brief: []string{"id", "displayName", "mail", "securityEnabled", "mailEnabled", "groupTypes", "onPremisesSyncEnabled"},
-	}.curated("description", "membershipRule", "isAssignableToRole")
+	}.curated("description", "membershipRule", "isAssignableToRole", "onPremisesSecurityIdentifier")
 	entraDevices = entraKind{path: "/v1.0/devices", typ: "#microsoft.graph.device", expand: "registeredOwners($select=" + strings.Join(entraUsers.brief, ",") + ")",
 		brief: []string{"id", "deviceId", "displayName", "operatingSystem", "accountEnabled", "trustType", "approximateLastSignInDateTime"},
-	}.curated("operatingSystemVersion", "isCompliant", "isManaged", "onPremisesSyncEnabled")
+	}.curated("operatingSystemVersion", "isCompliant", "isManaged", "onPremisesSyncEnabled", "onPremisesSecurityIdentifier")
 	entraManaged = entraKind{path: "/v1.0/deviceManagement/managedDevices",
 		brief: []string{"id", "deviceName", "operatingSystem", "osVersion", "complianceState", "lastSyncDateTime", "userPrincipalName"}}
 
@@ -168,6 +168,9 @@ func (d Deps) userGet(ctx context.Context, in entraIn) (map[string]any, error) {
 		return nil, err
 	}
 	d.nameSkus(ctx, out)
+	if len(in.Fields) == 0 {
+		d.addCounterpart(out, func() (*Counterpart, error) { return d.fromEntra(ctx, joinUser, out) })
+	}
 	return out, nil
 }
 
@@ -262,6 +265,7 @@ func (d Deps) groupGet(ctx context.Context, in entraIn) (map[string]any, error) 
 		}
 		out[key] = n.Count
 	}
+	d.addCounterpart(out, func() (*Counterpart, error) { return d.fromEntra(ctx, joinGroup, out) })
 	return out, nil
 }
 
@@ -361,7 +365,7 @@ func init() {
 				"is a direct member of. devices: the devices the user owns or registered, each with relation. licenses: "+
 				"assignedLicenses and licenseAssignmentStates (direct or group-inherited, errors), with skuPartNumber. "+
 				"auth_methods: the user's registered authentication methods. registration: the user's MFA and SSPR "+
-				"registration details (P1).",
+				"registration details (P1)."+counterpartDoc,
 			entraAction{Action{Name: "search", Perms: userRead}, entraSearch(entraUsers)},
 			entraAction{Action{Name: "get", Perms: userRead}, Deps.userGet},
 			entraAction{Action{Name: "member_of", Perms: groupRead}, related(entraUsers, "/memberOf", directoryObjects)},
@@ -381,7 +385,7 @@ func init() {
 				"groupTypes, onPremisesSyncEnabled). get: one group by object id, with description, membershipRule, "+
 				"isAssignableToRole, memberCount and ownerCount, but not its members. members: the group's members as "+
 				"briefs of their own kind (@odata.type says which); transitive=true lists every nested member instead. "+
-				"owners: the group's owners.",
+				"owners: the group's owners."+counterpartDoc,
 			entraAction{Action{Name: "search", Perms: groupRead}, entraSearch(entraGroups)},
 			entraAction{Action{Name: "get", Perms: groupRead}, Deps.groupGet},
 			entraAction{Action{Name: "members", Perms: groupRead}, func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
@@ -400,9 +404,11 @@ func init() {
 				"registered owners. managed_search: Intune managed devices as briefs (id, deviceName, operatingSystem, "+
 				"osVersion, complianceState, lastSyncDateTime, userPrincipalName); filter, not query. managed_get: one "+
 				"Intune managed device by its Intune id, every property (encryption, ownership, serial number and more). "+
-				"Intune is read only here.",
+				"Intune is read only here."+counterpartDoc,
 			entraAction{Action{Name: "search", Perms: deviceRead}, entraSearch(entraDevices)},
-			entraAction{Action{Name: "get", Perms: deviceRead}, entraGet(entraDevices)},
+			entraAction{Action{Name: "get", Perms: deviceRead}, func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
+				return d.entraGetJoined(ctx, joinDevice, in)
+			}},
 			entraAction{Action{Name: "owners", Perms: deviceRead}, related(entraDevices, "/registeredOwners", directoryObjects)},
 			entraAction{Action{Name: "managed_search", Perms: intuneRead, Licence: "Intune"}, entraSearch(entraManaged)},
 			entraAction{Action{Name: "managed_get", Perms: intuneRead, Licence: "Intune"}, entraGet(entraManaged)},

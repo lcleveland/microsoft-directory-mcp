@@ -47,14 +47,14 @@ var (
 	adUsers = adKind{class: "(&(objectCategory=person)(objectClass=user))",
 		brief: []string{"dn", "sAMAccountName", "userPrincipalName", "displayName", "mail", "enabled", "objectSid", "lastLogonTimestamp", "whenCreated"},
 	}.curated("pwdLastSet", "lockoutTime", "accountExpires", "msDS-UserPasswordExpiryTimeComputed", "title", "department",
-		"manager", "employeeID", "description", "memberOf", "adminCount", "servicePrincipalName", "whenChanged", "userAccountControl")
+		"manager", "employeeID", "description", "memberOf", "adminCount", "servicePrincipalName", "whenChanged", "userAccountControl", "msDS-ObjectSoa")
 	adGroups = adKind{class: "(objectClass=group)",
 		brief: []string{"dn", "sAMAccountName", "displayName", "groupType", "description", "objectSid"},
-	}.curated("managedBy", "memberCount", "memberOf", "adminCount", "whenChanged")
+	}.curated("managedBy", "memberCount", "memberOf", "adminCount", "whenChanged", "msDS-ObjectSoa")
 	adComputers = adKind{class: "(objectClass=computer)",
 		brief: []string{"dn", "sAMAccountName", "dNSHostName", "enabled", "objectSid", "lastLogonTimestamp", "whenCreated"},
 	}.curated("operatingSystem", "operatingSystemVersion", "managedBy", "description", "servicePrincipalName",
-		"msDS-SupportedEncryptionTypes", "whenChanged", "ms-Mcs-AdmPwdExpirationTime", "msLAPS-PasswordExpirationTime")
+		"msDS-SupportedEncryptionTypes", "whenChanged", "ms-Mcs-AdmPwdExpirationTime", "msLAPS-PasswordExpirationTime", "msDS-ObjectSoa")
 	adObjects = adKind{class: "(objectClass=*)",
 		brief: []string{"dn", "objectClass", "name", "sAMAccountName", "displayName", "objectSid", "objectGUID", "whenCreated", "whenChanged"},
 	}.curated()
@@ -198,6 +198,12 @@ func (d Deps) get(ctx context.Context, k adKind, in adIn) (map[string]any, error
 			n += len(vals)
 		}
 		out["memberCount"] = n
+	}
+	if j, ok := joinOf(k.class); ok && len(in.Fields) == 0 {
+		sid, _ := out["objectSid"].(string)
+		_, soa := ad.Field(out, "msDS-ObjectSoa")
+		soaS, _ := soa.(string)
+		d.addCounterpart(out, func() (*Counterpart, error) { return d.fromAD(ctx, j, sid, soaS) })
 	}
 	return out, nil
 }
@@ -362,7 +368,7 @@ func init() {
 				"out, as LDAP shows it: lockoutTime, msDS-User-Account-Control-Computed flags (LOCKOUT), lockoutTime_origin "+
 				"(the DC that originated the last lockoutTime write, from replication metadata) and per_dc badPwdCount and "+
 				"badPasswordTime from every DC of the user's domain (they don't replicate; unreachable DCs in _skipped). "+
-				"The machine the bad passwords came from (event 4740) is not read.", adUsers,
+				"The machine the bad passwords came from (event 4740) is not read."+counterpartDoc, adUsers,
 			adExtra{Action{Name: "resultant_policy", ADProbe: "pso-read"}, Deps.resultantPolicy}, adExtra{Action{Name: "lockout"}, Deps.lockout}),
 		Tool{Name: "ad_group", Group: "identity", Actions: []Action{{Name: "search"}, {Name: "get"}, {Name: "members"}},
 			add: func(s *mcp.Server, d Deps, t Tool, visible []string) {
@@ -370,7 +376,7 @@ func init() {
 					Description: "Groups of the forest. search: list groups as briefs (dn, sAMAccountName, displayName, " +
 						"groupType scope and type, description, objectSid). get: one group by id, with managedBy, memberCount, " +
 						"memberOf (first 100) and adminCount, but not its members. members: the group's members as briefs " +
-						"of their own kind, 200 a page; transitive=true lists every nested member instead (each once).\n\n" + adSearchDoc},
+						"of their own kind, 200 a page; transitive=true lists every nested member instead (each once)." + counterpartDoc + "\n\n" + adSearchDoc},
 					visible, func(ctx context.Context, _ *mcp.CallToolRequest, in adGroupIn) (*mcp.CallToolResult, map[string]any, error) {
 						var (
 							out map[string]any
@@ -391,7 +397,7 @@ func init() {
 			"Computer accounts of the forest. search: list computers as briefs (dn, sAMAccountName, dNSHostName, "+
 				"enabled, objectSid, lastLogonTimestamp, whenCreated). get: one computer by id, with operating system "+
 				"and version, managedBy, servicePrincipalName, supported encryption types and the LAPS password expiry "+
-				"(never the password).", adComputers),
+				"(never the password)."+counterpartDoc, adComputers),
 		adOUTool,
 		Tool{Name: "ad_object", Group: "identity", Actions: []Action{{Name: "get"}, {Name: "search_deleted"}},
 			add: func(s *mcp.Server, d Deps, t Tool, visible []string) {

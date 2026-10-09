@@ -10,6 +10,9 @@ import (
 	"github.com/go-ldap/ldap/v3"
 )
 
+// ErrNoMatch is wrapped by Resolve and Get when no object matches.
+var ErrNoMatch = errors.New("no match")
+
 var guidRE = regexp.MustCompile(`^\{?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}?$`)
 
 // Resolve turns an identifier into the DN of an object matching class (an
@@ -79,7 +82,7 @@ func searchDNs(conn Conn, base, filter string) ([]string, error) {
 func one(id string, dns []string) (string, error) {
 	switch len(dns) {
 	case 0:
-		return "", fmt.Errorf("%q: no match for this tool (a DN, SID, GUID, UPN, sAMAccountName or DOMAIN\\sam)", id)
+		return "", fmt.Errorf("%q: %w for this tool (a DN, SID, GUID, UPN, sAMAccountName or DOMAIN\\sam)", id, ErrNoMatch)
 	case 1:
 		return dns[0], nil
 	}
@@ -103,7 +106,7 @@ func (c *Client) Get(ctx context.Context, id, class string, attrs []string) (*ld
 	}
 	res, err := conn.Search(ldap.NewSearchRequest(dn, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 1, 0, false, class, attrs, nil))
 	if ldap.IsErrorWithCode(err, ldap.LDAPResultNoSuchObject) || err == nil && len(res.Entries) == 0 {
-		return nil, fmt.Errorf("%q: no match for this tool", id)
+		return nil, fmt.Errorf("%q: %w for this tool", id, ErrNoMatch)
 	}
 	if err != nil {
 		return nil, err
