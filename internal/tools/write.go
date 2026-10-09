@@ -90,10 +90,14 @@ type adWrite struct {
 	confirm      bool     // in.Confirm must name the target
 	attrs        []string // read before the write, for changes
 	changes      func(*ldap.Entry) ([]ldap.Change, error)
+	controls     []ldap.Control
 }
 
-// adModify is the transport's Modify; a seam for tests.
-var adModify = (*ad.Client).Modify
+// adModify and adProtected are the transport's Modify and Protected; seams for tests.
+var (
+	adModify    = (*ad.Client).Modify
+	adProtected = (*ad.Client).Protected
+)
 
 // adWrite runs w through the AD rails. Every AD write goes through here, so
 // none skips the reason, the pre-read on the PDC emulator, the protected
@@ -128,6 +132,12 @@ func (d Deps) adWrite(ctx context.Context, w adWrite) (map[string]any, error) {
 			if err != nil {
 				return nil, err
 			}
+			// A reset's must-change rides on its password write, under ad-passwords.
+			if strings.EqualFold(ch.Modification.Type, "pwdLastSet") && slices.ContainsFunc(changes, func(x ldap.Change) bool {
+				return strings.EqualFold(x.Modification.Type, "unicodePwd")
+			}) {
+				c = "ad-passwords"
+			}
 			if !d.Config.Capabilities[c] {
 				return nil, fmt.Errorf("writing %s needs the %s capability, which the operator has not enabled", ch.Modification.Type, c)
 			}
@@ -143,7 +153,7 @@ func (d Deps) adWrite(ctx context.Context, w adWrite) (map[string]any, error) {
 		// Logged before sending too, so a write cut off mid-call still has a record.
 		d.log().Info("ad write", append(audit, "outcome", "sending")...)
 		sent = true
-		return &ldap.ModifyRequest{DN: e.DN, Changes: changes}, nil
+		return &ldap.ModifyRequest{DN: e.DN, Changes: changes, Controls: w.controls}, nil
 	})
 	audit = append(audit, "dc", tgt.DC, "fallback", tgt.Fallback)
 	if err != nil {
@@ -240,6 +250,80 @@ func accountState(tool string, k adKind, action string) adExtra {
 		return d.adWrite(ctx, adWrite{tool: tool, action: action, id: in.ID, class: k.class, in: in.writeIn,
 			changes: func(e *ldap.Entry) ([]ldap.Change, error) { return change(e, in) }})
 	}}
+}
+
+// resetPassword is ad_user reset_password (ad-passwords): a generated
+// password set by replacing unicodePwd over the TLS session, with
+// must-change unless turned off. The reply is the one place it appears.
+var resetPassword = adExtra{Action{Name: "reset_password", Capabilities: []string{"ad-passwords"}}, func(d Deps, ctx context.Context, in adIn) (map[string]any, error) {
+	var pw secret
+	must := in.MustChange == nil || *in.MustChange
+	out, err := d.adWrite(ctx, adWrite{tool: "ad_user", action: "reset_password", id: in.ID, class: adUsers.class, in: in.writeIn,
+		confirm: true, attrs: []string{"displayName"},
+		changes: func(e *ldap.Entry) ([]ldap.Change, error) {
+			pw = newPassword(0, e.GetAttributeValue("sAMAccountName"), e.GetAttributeValue("displayName"))
+			// unicodePwd is the password in quotes, as UTF-16LE; generated passwords are ASCII.
+			var v []byte
+			for _, c := range `"` + string(pw) + `"` {
+				v = append(v, byte(c), 0)
+			}
+			ch := []ldap.Change{{Operation: ldap.ReplaceAttribute, Modification: ldap.PartialAttribute{Type: "unicodePwd", Vals: []string{string(v)}}}}
+			if must {
+				ch = append(ch, ldap.Change{Operation: ldap.ReplaceAttribute, Modification: ldap.PartialAttribute{Type: "pwdLastSet", Vals: []string{"0"}}})
+			}
+			return ch, nil
+		}})
+	if err != nil {
+		return nil, err
+	}
+	out["password"], out["must_change"] = string(pw), must
+	return out, nil
+}}
+
+// maxMembers caps the members of one membership write (ADR 0001).
+const maxMembers = 20
+
+// membership is ad_group add_members or remove_members
+// (ad-group-membership): one permissive modify of the group's member, so
+// adding a member already in or removing one already out succeeds. A
+// protected member is refused, as a protected group is.
+func (d Deps) membership(ctx context.Context, in adGroupIn) (map[string]any, error) {
+	if n := len(in.Members); n == 0 || n > maxMembers {
+		return nil, fmt.Errorf("%s takes 1 to %d members, got %d: call again for more", in.Action, maxMembers, n)
+	}
+	op := uint(ldap.AddAttribute)
+	if in.Action == "remove_members" {
+		op = ldap.DeleteAttribute
+	}
+	var dns []string
+	// Members are checked inside the write, after its reason, and a refusal is audited.
+	changes := func(*ldap.Entry) ([]ldap.Change, error) {
+		for _, m := range in.Members {
+			dn, err := d.AD.Resolve(ctx, m, adObjects.class)
+			if err != nil {
+				return nil, fmt.Errorf("member %w", err)
+			}
+			why, err := adProtected(d.AD, ctx, dn)
+			if err != nil {
+				return nil, fmt.Errorf("member %w", err)
+			}
+			if why != "" {
+				return nil, fmt.Errorf("member %s: %w: %s", dn, ad.ErrProtected, why)
+			}
+			dns = append(dns, dn)
+		}
+		slices.Sort(dns)
+		dns = slices.Compact(dns) // one value twice in a modify is an error, even permissive
+		return []ldap.Change{{Operation: op, Modification: ldap.PartialAttribute{Type: "member", Vals: dns}}}, nil
+	}
+	out, err := d.adWrite(ctx, adWrite{tool: "ad_group", action: in.Action, id: in.ID, class: adGroups.class, in: in.writeIn,
+		controls: []ldap.Control{ldap.NewControlString(ldap.ControlTypeMicrosoftPermissiveModify, true, "")},
+		changes:  changes})
+	if err != nil {
+		return nil, err
+	}
+	out["members"] = dns
+	return out, nil
 }
 
 // fileTime turns an RFC 3339 time, or never, into an accountExpires value.

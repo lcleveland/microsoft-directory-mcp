@@ -133,7 +133,8 @@ type adIn struct {
 	Fields []string `json:"fields,omitempty" jsonschema:"LDAP attribute names to return instead of the default set (enabled is derived from userAccountControl); binary attributes come base64"`
 	Cursor string   `json:"cursor,omitempty" jsonschema:"next_cursor from the previous call with the same arguments, unchanged"`
 	writeIn
-	Expires string `json:"expires,omitempty" jsonschema:"writes, set_expiry: when the account expires, an RFC 3339 time (2026-12-31T23:59:59Z), or never"`
+	Expires    string `json:"expires,omitempty" jsonschema:"writes, set_expiry: when the account expires, an RFC 3339 time (2026-12-31T23:59:59Z), or never"`
+	MustChange *bool  `json:"must_change,omitempty" jsonschema:"writes, reset_password: make the user change the password at next logon; default true"`
 }
 
 // keys are the fields asked for, or def.
@@ -146,7 +147,8 @@ func (in adIn) keys(def []string) []string {
 
 type adGroupIn struct {
 	adIn
-	Transitive bool `json:"transitive,omitempty" jsonschema:"members: every nested member, not only direct ones"`
+	Transitive bool     `json:"transitive,omitempty" jsonschema:"members: every nested member, not only direct ones"`
+	Members    []string `json:"members,omitempty" jsonschema:"writes, add_members, remove_members: up to 20 members by id (a DN, SID, GUID, UPN, sAMAccountName or DOMAIN\\sam)"`
 }
 
 // search runs a fanned-out list of k, narrowed by the input.
@@ -399,6 +401,23 @@ func accountStateDoc(visible []string) string {
 		"members) and accounts managed in the tenant are refused. On a synced account, sync says when Entra follows."
 }
 
+// resetDoc describes reset_password when it shows.
+func resetDoc(visible []string) string {
+	if !slices.Contains(visible, "reset_password") {
+		return ""
+	}
+	return "\n\nreset_password (the ad-passwords capability): sets a password the server generates on one user by id, " +
+		"with confirm (its sAMAccountName) and a reason. The reply's password is the only copy: it is never logged. " +
+		"The user must change it at next logon unless must_change is false. Sent to the PDC emulator (dc in the reply). " +
+		"Protected targets and accounts managed in the tenant are refused."
+}
+
+// membershipDoc describes add_members and remove_members when they show.
+const membershipDoc = "\n\nadd_members, remove_members (the ad-group-membership capability): up to 20 members of one " +
+	"group by id, with a reason, in one modify on the PDC emulator; a member already in (or already out) is no error. " +
+	"Protected groups and members (adminCount, built-in, domain controllers, protected group members) and groups " +
+	"managed in the tenant are refused."
+
 func adReadTool(name, group, title, desc string, k adKind, extra ...adExtra) Tool {
 	actions := []Action{{Name: "search"}, {Name: "get"}}
 	for _, x := range extra {
@@ -410,7 +429,7 @@ func adReadTool(name, group, title, desc string, k adKind, extra ...adExtra) Too
 	}
 	return Tool{Name: name, Group: group, Actions: actions,
 		add: func(s *mcp.Server, d Deps, t Tool, visible []string) {
-			addActionTool(s, d, t, &mcp.Tool{Name: name, Title: title, Description: desc + "\n\n" + adSearchDoc + accountStateDoc(visible),
+			addActionTool(s, d, t, &mcp.Tool{Name: name, Title: title, Description: desc + "\n\n" + adSearchDoc + accountStateDoc(visible) + resetDoc(visible),
 				Annotations: readOnly}, visible,
 				func(ctx context.Context, _ *mcp.CallToolRequest, in adIn) (*mcp.CallToolResult, map[string]any, error) {
 					for _, x := range extra {
@@ -444,14 +463,19 @@ func init() {
 				"The machine the bad passwords came from (event 4740) is not read."+counterpartDoc, adUsers,
 			adExtra{Action{Name: "resultant_policy", ADProbe: "pso-read"}, Deps.resultantPolicy}, adExtra{Action{Name: "lockout"}, Deps.lockout},
 			accountState("ad_user", adUsers, "disable"), accountState("ad_user", adUsers, "enable"), accountState("ad_user", adUsers, "unlock"),
-			accountState("ad_user", adUsers, "must_change"), accountState("ad_user", adUsers, "set_expiry")),
-		Tool{Name: "ad_group", Group: "identity", Actions: []Action{{Name: "search"}, {Name: "get"}, {Name: "members"}},
+			accountState("ad_user", adUsers, "must_change"), accountState("ad_user", adUsers, "set_expiry"), resetPassword),
+		Tool{Name: "ad_group", Group: "identity", Actions: []Action{{Name: "search"}, {Name: "get"}, {Name: "members"},
+			{Name: "add_members", Capabilities: []string{"ad-group-membership"}}, {Name: "remove_members", Capabilities: []string{"ad-group-membership"}}},
 			add: func(s *mcp.Server, d Deps, t Tool, visible []string) {
+				desc := ""
+				if slices.Contains(visible, "add_members") {
+					desc = membershipDoc
+				}
 				addActionTool(s, d, t, &mcp.Tool{Name: t.Name, Title: "Active Directory groups", Annotations: readOnly,
 					Description: "Groups of the forest. search: list groups as briefs (dn, sAMAccountName, displayName, " +
 						"groupType scope and type, description, objectSid). get: one group by id, with managedBy, memberCount, " +
 						"memberOf (first 100) and adminCount, but not its members. members: the group's members as briefs " +
-						"of their own kind, 200 a page; transitive=true lists every nested member instead (each once)." + counterpartDoc + "\n\n" + adSearchDoc},
+						"of their own kind, 200 a page; transitive=true lists every nested member instead (each once)." + counterpartDoc + "\n\n" + adSearchDoc + desc},
 					visible, func(ctx context.Context, _ *mcp.CallToolRequest, in adGroupIn) (*mcp.CallToolResult, map[string]any, error) {
 						var (
 							out map[string]any
@@ -462,6 +486,8 @@ func init() {
 							out, err = d.get(ctx, adGroups, in.adIn)
 						case "members":
 							out, err = d.members(ctx, in)
+						case "add_members", "remove_members":
+							out, err = d.membership(ctx, in)
 						default:
 							out, err = d.search(ctx, adGroups, in.adIn, ad.Query{})
 						}

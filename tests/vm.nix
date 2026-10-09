@@ -33,6 +33,7 @@ let
   bindUser = "svc-mcp";
   bindPass = "VmTest-Bind-Pass-1!";
   lockedPass = "VmTest-Locked-Pass-1!";
+  resetPass = "VmTest-Reset-Pass-1!";
   tenant = "00000000-0000-0000-0000-0000000000aa";
   clientId = "00000000-0000-0000-0000-0000000000bb";
   httpToken = "mcp-http-bearer";
@@ -644,13 +645,13 @@ let
     added = call("entra_audit", {"action": "search", "filter": "activityDisplayName eq 'Add user'"})["results"]
     assert [a["initiatedBy"]["user"]["userPrincipalName"] for a in added] == ["admin@example.com"], added
 
-    # Writes: the server runs with --capabilities ad-account-state,entra-account-state.
-    assert ad["enabled_capabilities"] == ["ad-account-state"], ad
+    # Writes: the server runs with --capabilities ad-account-state,ad-passwords,ad-group-membership,entra-account-state.
+    assert ad["enabled_capabilities"] == ["ad-account-state", "ad-passwords", "ad-group-membership"], ad
     assert entra["enabled_capabilities"] == ["entra-account-state"], entra
     api = next(t for t in listed["result"]["tools"] if t["name"] == "ad_api")
     assert api["inputSchema"]["properties"]["action"]["enum"] == ["search", "modify"], api
     user = next(t for t in listed["result"]["tools"] if t["name"] == "ad_user")
-    assert user["inputSchema"]["properties"]["action"]["enum"][-5:] == ["disable", "enable", "unlock", "must_change", "set_expiry"], user
+    assert user["inputSchema"]["properties"]["action"]["enum"][-6:] == ["disable", "enable", "unlock", "must_change", "set_expiry", "reset_password"], user
     # ad-delete is off: absent from the schemas, and refused if called anyway.
     print("ad_api delete", refused("ad_api", {"action": "delete", "dn": "${userDN 43}", "reason": "vm-test"}))
     # Protected: a Domain Admins member, though the bind account could write it.
@@ -670,6 +671,28 @@ let
         assert w["dc"] == "${dcHost}:636" and not w.get("fallback"), w
         assert w["sync"].startswith("the change reaches its Entra counterpart " + synced["id"]), w
         assert call("ad_user", {"action": "get", "id": "vmuser042", "fields": ["enabled"]})["enabled"] is enabled
+
+    # ad-passwords: a Domain Admins member is refused; a confirm mismatch sends nothing.
+    why = refused("ad_user", {"action": "reset_password", "id": "vmuser200", "confirm": "vmuser200", "reason": "vm-test reset protected"})
+    print("ad_user reset_password vmuser200", why)
+    assert "protected target" in why, why
+    before = call("ad_user", {"action": "get", "id": "vm-reset", "fields": ["pwdLastSet"]})["pwdLastSet"]
+    why = refused("ad_user", {"action": "reset_password", "id": "vm-reset", "confirm": "vmuser200", "reason": "vm-test reset mismatch"})
+    assert "confirm must be the target's name exactly" in why, why
+    assert call("ad_user", {"action": "get", "id": "vm-reset", "fields": ["pwdLastSet"]})["pwdLastSet"] == before
+    # A one-target reset, without must-change so the new password binds; the test script binds with it.
+    w = call("ad_user", {"action": "reset_password", "id": "vm-reset", "confirm": "vm-reset", "must_change": False,
+                         "reason": "vm-test reset vm-reset"})
+    assert w["dc"] == "${dcHost}:636" and w["must_change"] is False and len(w["password"]) >= 20, {k: v for k, v in w.items() if k != "password"}
+    with open("/tmp/vm-reset-password", "w") as f:
+        f.write(w["password"])
+    # ad-group-membership: vmuser100 in and out of vm-team.
+    for action, present in (("add_members", True), ("remove_members", False)):
+        w = call("ad_group", {"action": action, "id": "vm-team", "members": ["vmuser100"], "reason": "vm-test " + action})
+        print("ad_group", action, json.dumps(w))
+        assert w["members"] == ["${userDN 100}"] and w["dc"] == "${dcHost}:636", w
+        dns = [m["dn"] for m in call("ad_group", {"action": "members", "id": "vm-team"})["results"]]
+        assert ("${userDN 100}" in dns) is present, dns
 
     # entra-account-state: the synced user's disable is refused and routed to AD; a cloud user's goes through.
     why = refused("entra_user", {"action": "disable", "id": synced["id"], "reason": "vm-test entra synced"})
@@ -732,10 +755,10 @@ pkgs.testers.runNixOSTest {
             sed -i '/\[global\]/a old password allowed period = 0' ${smbConf}
             sed -i '/\[global\]/a tls keyfile = ${tlsDir}/key.pem\n\ttls certfile = ${tlsDir}/cert.pem\n\ttls cafile = ${tlsDir}/ca.pem' ${smbConf}
             samba-tool user create ${bindUser} '${bindPass}' -s ${smbConf}
-            # The bind account may write users under CN=Users; the seed users added next inherit it.
+            # The bind account may write (and reset passwords of) objects under CN=Users; the seed objects added next inherit it.
             svcSid=$(ldbsearch -H /var/lib/samba-dc/private/sam.ldb '(sAMAccountName=${bindUser})' objectSid | sed -n 's/^objectSid: //p')
             samba-tool dsacl set -H /var/lib/samba-dc/private/sam.ldb -s ${smbConf} \
-              --objectdn='CN=Users,${base}' --sddl="(A;CI;RPWP;;;$svcSid)"
+              --objectdn='CN=Users,${base}' --sddl="(A;CI;RPWPCR;;;$svcSid)"
             ldbadd -H /var/lib/samba-dc/private/sam.ldb ${seedLdif}
             # Writes read tokenGroups to find protected-group members; the bind account needs this group for that.
             samba-tool group addmembers 'Windows Authorization Access Group' ${bindUser} -s ${smbConf}
@@ -752,6 +775,8 @@ pkgs.testers.runNixOSTest {
             # vm-locked, locked out by bad binds before the session, under a domain lockout threshold of 3.
             samba-tool domain passwordsettings set --account-lockout-threshold=3 -s ${smbConf}
             samba-tool user create vm-locked '${lockedPass}' -s ${smbConf}
+            # vm-reset, whose password ad_user reset_password replaces.
+            samba-tool user create vm-reset '${resetPass}' -s ${smbConf}
           fi
         '';
         serviceConfig = {
@@ -826,7 +851,7 @@ pkgs.testers.runNixOSTest {
         logLevel = "debug";
         extraArgs = [
           "--capabilities"
-          "ad-account-state,entra-account-state"
+          "ad-account-state,ad-passwords,ad-group-membership,entra-account-state"
         ];
         http.authTokenFile = "/run/mcp-bearer";
         ad = {
@@ -888,6 +913,18 @@ pkgs.testers.runNixOSTest {
                        for x in journal.splitlines()), line
         assert any('reason="vm-test protected"' in x and 'outcome="not sent"' in x for x in journal.splitlines()), journal
         assert any('reason="vm-test entra disable"' in x and "outcome=ok" in x and "capability=entra-account-state" in x
+                   for x in journal.splitlines()), journal
+
+    with subtest("the reset password binds, the old one does not, and the journal never has it"):
+        pw = machine.succeed("cat /tmp/vm-reset-password")
+        bind = "LDAPTLS_CACERT=/run/samba-ca.pem ldapwhoami -x -H ldaps://${dcHost} -D vm-reset@corp.example.com -w "
+        machine.succeed(bind + f"'{pw}'")
+        machine.fail(bind + "'${resetPass}'")
+        journal = machine.succeed("journalctl -o cat --no-pager -u microsoft-directory-mcp.service")
+        assert pw not in journal, "the reset password leaked into the journal"
+        assert any('reason="vm-test reset vm-reset"' in x and "outcome=ok" in x and "capability=ad-passwords" in x
+                   for x in journal.splitlines()), journal
+        assert any('reason="vm-test add_members"' in x and "outcome=ok" in x and "capability=ad-group-membership" in x
                    for x in journal.splitlines()), journal
 
     with subtest("the stub recorded the cloud user's disable and no write to the synced user"):

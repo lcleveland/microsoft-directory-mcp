@@ -151,3 +151,27 @@ func TestModifyCompareAndSwap(t *testing.T) {
 		t.Errorf("stale value: %v", err)
 	}
 }
+
+// Protected reads any object, from any DC of its domain, as Modify's
+// pre-read does: why it is protected, or "".
+func TestProtected(t *testing.T) {
+	f := newFakeDir()
+	cases := seedProtected(f)
+	c := f.client(srvConfig())
+	for name, dn := range cases {
+		if why, err := c.Protected(context.Background(), dn); err != nil || why == "" {
+			t.Errorf("%s: %q %v", name, why, err)
+		}
+	}
+	for _, dn := range []string{plain, lonely} {
+		if why, err := c.Protected(context.Background(), dn); err != nil || why != "" {
+			t.Errorf("%s: %q %v", dn, why, err)
+		}
+	}
+	if _, err := c.Protected(context.Background(), "CN=gone,CN=Users,"+corpDN); !errors.Is(err, ErrNoMatch) {
+		t.Errorf("missing: %v", err)
+	}
+	if len(f.modifies) != 0 {
+		t.Errorf("wrote: %q", f.modifies)
+	}
+}

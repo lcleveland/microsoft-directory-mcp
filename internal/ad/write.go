@@ -109,3 +109,25 @@ func rid(sid []byte) (uint32, bool) {
 	n, err := strconv.ParseUint(s[i+1:], 10, 32)
 	return uint32(n), strings.HasPrefix(s, "S-") && err == nil
 }
+
+// Protected reads dn from a DC of its domain and says why it is a protected
+// target, or "" when it is not: for the other objects a write names, such
+// as the members a membership write adds or removes.
+func (c *Client) Protected(ctx context.Context, dn string) (string, error) {
+	d, err := c.DomainOf(ctx, dn)
+	if err != nil {
+		return "", err
+	}
+	conn, _, err := c.Conn(ctx, d)
+	if err != nil {
+		return "", err
+	}
+	res, err := conn.Search(ldap.NewSearchRequest(dn, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 1, 0, false, "(objectClass=*)", preRead, nil))
+	if ldap.IsErrorWithCode(err, ldap.LDAPResultNoSuchObject) || err == nil && len(res.Entries) == 0 {
+		return "", fmt.Errorf("%q: %w", dn, ErrNoMatch)
+	}
+	if err != nil {
+		return "", err
+	}
+	return protected(res.Entries[0]), nil
+}

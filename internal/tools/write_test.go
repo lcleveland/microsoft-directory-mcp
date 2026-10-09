@@ -76,7 +76,9 @@ func writeDeps(t *testing.T, e *ldap.Entry, caps ...string) (Deps, *bytes.Buffer
 		}
 		return ad.Target{DC: "dc2.corp.example.com:636"}, err
 	}
-	t.Cleanup(func() { adModify = old })
+	oldP := adProtected
+	adProtected = func(*ad.Client, context.Context, string) (string, error) { return "", nil }
+	t.Cleanup(func() { adModify, adProtected = old, oldP })
 	c := map[string]bool{}
 	for _, x := range caps {
 		c[x] = true
@@ -249,27 +251,8 @@ func TestNewPassword(t *testing.T) {
 // write parameters; ad_api shows modify but not ad-delete's delete, and
 // refuses delete if called.
 func TestAccountStateRegisters(t *testing.T) {
-	cfg := &config.Config{ToolGroups: map[string]bool{}, Capabilities: map[string]bool{"ad-account-state": true},
-		AD: &config.AD{TLS: "ldaps", DCs: []string{"127.0.0.1:1"}}}
-	for _, g := range config.Groups {
-		cfg.ToolGroups[g] = true
-	}
-	a, err := ad.New(cfg.AD, time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := mcp.NewServer(&mcp.Implementation{Name: "t"}, nil)
-	Register(s, Deps{Config: cfg, AD: a})
-	st, ct := mcp.NewInMemoryTransports()
+	cs := writeSession(t, "ad-account-state")
 	ctx := context.Background()
-	if _, err := s.Connect(ctx, st, nil); err != nil {
-		t.Fatal(err)
-	}
-	cs, err := mcp.NewClient(&mcp.Implementation{Name: "c"}, nil).Connect(ctx, ct, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { cs.Close() })
 	got := listed(t, cs)
 	for name, want := range map[string][]string{
 		"ad_user":     {"search", "get", "resultant_policy", "lockout", "disable", "enable", "unlock", "must_change", "set_expiry"},
@@ -302,5 +285,181 @@ func TestAccountStateRegisters(t *testing.T) {
 	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "ad_api", Arguments: map[string]any{"action": "delete", "dn": ada, "reason": "r"}})
 	if err != nil || !res.IsError {
 		t.Errorf("ad_api delete ran: %v %+v", err, res)
+	}
+}
+
+// A reset sets a generated password, with must-change unless turned off,
+// under ad-passwords alone; the reply returns it once and the audit log
+// never has it.
+func TestResetPassword(t *testing.T) {
+	for _, keep := range []bool{false, true} {
+		d, buf, sent := writeDeps(t, adaEntry(map[string][]string{"displayName": {"Ada Lovelace"}}), "ad-passwords")
+		in := adIn{ID: ada, writeIn: writeIn{Reason: "r", Confirm: "ada"}}
+		if keep {
+			in.MustChange = new(false)
+		}
+		out, err := run(d, resetPassword, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pw, _ := out["password"].(string)
+		if len(pw) < 20 || !complexEnough(pw, []string{"ada", "Ada Lovelace"}) || out["must_change"] != !keep || out["dc"] == nil {
+			t.Errorf("keep=%v: reply %v", keep, out)
+		}
+		if len(*sent) != 1 {
+			t.Fatalf("sent %d", len(*sent))
+		}
+		var quoted []byte
+		for _, c := range `"` + pw + `"` {
+			quoted = append(quoted, byte(c), 0)
+		}
+		want := []ldap.Change{{Operation: ldap.ReplaceAttribute, Modification: ldap.PartialAttribute{Type: "unicodePwd", Vals: []string{string(quoted)}}}}
+		if !keep {
+			want = append(want, ldap.Change{Operation: ldap.ReplaceAttribute, Modification: ldap.PartialAttribute{Type: "pwdLastSet", Vals: []string{"0"}}})
+		}
+		if got := (*sent)[0].Changes; fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Errorf("keep=%v: changes %v", keep, got)
+		}
+		log := buf.String()
+		if strings.Contains(log, pw) || !strings.Contains(log, "capability=ad-passwords") || !strings.Contains(log, "outcome=ok") {
+			t.Errorf("keep=%v: audit log:\n%s", keep, log)
+		}
+	}
+}
+
+// Membership writes add or remove up to 20 members in one permissive
+// modify of the group.
+func TestMembers(t *testing.T) {
+	const team = "CN=team,CN=Users,DC=corp,DC=example,DC=com"
+	g := ldap.NewEntry(team, map[string][]string{"objectClass": {"top", "group"}, "sAMAccountName": {"team"}})
+	for _, tc := range []struct {
+		action string
+		op     uint
+	}{{"add_members", ldap.AddAttribute}, {"remove_members", ldap.DeleteAttribute}} {
+		d, buf, sent := writeDeps(t, g, "ad-group-membership")
+		out, err := d.membership(context.Background(), adGroupIn{adIn: adIn{ActionParam: ActionParam{tc.action}, ID: team,
+			writeIn: writeIn{Reason: "r"}}, Members: []string{ada, ada}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out["action"] != tc.action || len(*sent) != 1 {
+			t.Fatalf("%s: %v, sent %d", tc.action, out, len(*sent))
+		}
+		req := (*sent)[0]
+		want := []ldap.Change{{Operation: tc.op, Modification: ldap.PartialAttribute{Type: "member", Vals: []string{ada}}}}
+		if fmt.Sprint(req.Changes) != fmt.Sprint(want) || len(req.Controls) != 1 || req.Controls[0].GetControlType() != ldap.ControlTypeMicrosoftPermissiveModify {
+			t.Errorf("%s: %v %v", tc.action, req.Changes, req.Controls)
+		}
+		if !strings.Contains(buf.String(), "capability=ad-group-membership") {
+			t.Errorf("%s: audit log:\n%s", tc.action, buf.String())
+		}
+	}
+}
+
+// Every membership and reset refusal refuses before sending.
+func TestMemberAndResetRefusals(t *testing.T) {
+	const team = "CN=team,CN=Users,DC=corp,DC=example,DC=com"
+	g := ldap.NewEntry(team, map[string][]string{"objectClass": {"top", "group"}, "sAMAccountName": {"team"}})
+	many := make([]string, 21)
+	for i := range many {
+		many[i] = fmt.Sprintf("CN=u%d,CN=Users,DC=corp,DC=example,DC=com", i)
+	}
+	add := func(members ...string) func(Deps) (map[string]any, error) {
+		return func(d Deps) (map[string]any, error) {
+			return d.membership(context.Background(), adGroupIn{adIn: adIn{ActionParam: ActionParam{"add_members"}, ID: team,
+				writeIn: writeIn{Reason: "r"}}, Members: members})
+		}
+	}
+	for _, tc := range []struct {
+		name  string
+		entry *ldap.Entry
+		w     func(Deps) (map[string]any, error)
+		says  string
+	}{
+		{"no members", g, add(), "1 to 20 members"},
+		{"21 members", g, add(many...), "1 to 20 members"},
+		{"protected member", g, add(ada, "CN=Administrator,CN=Users,DC=corp,DC=example,DC=com"), "whatever capabilities are enabled: RID 500"},
+		{"no reason", g, func(d Deps) (map[string]any, error) {
+			return d.membership(context.Background(), adGroupIn{adIn: adIn{ActionParam: ActionParam{"add_members"}, ID: team}, Members: []string{ada}})
+		}, "reason is required"},
+		{"reset without confirm", adaEntry(nil), func(d Deps) (map[string]any, error) {
+			return run(d, resetPassword, adIn{ID: ada, writeIn: writeIn{Reason: "r"}})
+		}, "confirm must be the target's name exactly"},
+		{"reset confirm mismatch", adaEntry(nil), func(d Deps) (map[string]any, error) {
+			return run(d, resetPassword, adIn{ID: ada, writeIn: writeIn{Reason: "r", Confirm: "Ada"}})
+		}, "confirm must be the target's name exactly"},
+	} {
+		d, _, sent := writeDeps(t, tc.entry, "ad-passwords", "ad-group-membership")
+		adProtected = func(_ *ad.Client, _ context.Context, dn string) (string, error) {
+			if strings.HasPrefix(dn, "CN=Administrator,") {
+				return "RID 500", nil
+			}
+			return "", nil
+		}
+		_, err := tc.w(d)
+		if err == nil || !strings.Contains(err.Error(), tc.says) {
+			t.Errorf("%s: %v", tc.name, err)
+		}
+		if len(*sent) != 0 {
+			t.Errorf("%s: sent %v", tc.name, (*sent)[0])
+		}
+	}
+}
+
+// writeSession is a client session of the real roster, every group on,
+// with capabilities caps.
+func writeSession(t *testing.T, caps ...string) *mcp.ClientSession {
+	t.Helper()
+	cfg := &config.Config{ToolGroups: map[string]bool{}, Capabilities: map[string]bool{},
+		AD: &config.AD{TLS: "ldaps", DCs: []string{"127.0.0.1:1"}}}
+	for _, g := range config.Groups {
+		cfg.ToolGroups[g] = true
+	}
+	for _, c := range caps {
+		cfg.Capabilities[c] = true
+	}
+	a, err := ad.New(cfg.AD, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := mcp.NewServer(&mcp.Implementation{Name: "t"}, nil)
+	Register(s, Deps{Config: cfg, AD: a})
+	st, ct := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	if _, err := s.Connect(ctx, st, nil); err != nil {
+		t.Fatal(err)
+	}
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "c"}, nil).Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cs.Close() })
+	return cs
+}
+
+// With ad-passwords and ad-group-membership on, ad_user shows
+// reset_password with confirm and must_change, and ad_group its
+// membership writes with members.
+func TestPasswordsAndMembershipRegister(t *testing.T) {
+	cs := writeSession(t, "ad-passwords", "ad-group-membership")
+	got := listed(t, cs)
+	for name, want := range map[string][]string{
+		"ad_user":  {"search", "get", "resultant_policy", "lockout", "reset_password"},
+		"ad_group": {"search", "get", "members", "add_members", "remove_members"},
+	} {
+		if !slices.Equal(got[name], want) {
+			t.Errorf("%s: %v, want %v", name, got[name], want)
+		}
+	}
+	for name, want := range map[string][]string{"ad_user": {"reason", "confirm", "must_change"}, "ad_group": {"reason", "members"}} {
+		p := props(t, cs, name)
+		for _, w := range want {
+			if !slices.Contains(p, w) {
+				t.Errorf("%s lacks %s: %v", name, w, p)
+			}
+		}
+		if slices.Contains(p, "expires") || name == "ad_group" && slices.Contains(p, "confirm") {
+			t.Errorf("%s shows a parameter of a write it lacks: %v", name, p)
+		}
 	}
 }
