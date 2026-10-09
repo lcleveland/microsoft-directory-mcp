@@ -94,10 +94,11 @@ type entraIn struct {
 	// Only on entra_group.
 	Transitive bool `json:"transitive,omitempty" jsonschema:"entra_group members: every nested member, not only direct ones"`
 	// Only on entra_user.
-	MustChange *bool  `json:"must_change,omitempty" jsonschema:"writes, reset_password: make the user change the password at next sign-in; default true"`
-	MethodID   string `json:"method_id,omitempty" jsonschema:"writes, delete_auth_method: the id of the authentication method, from auth_methods"`
-	UPN        string `json:"upn,omitempty" jsonschema:"writes, create: the new user's userPrincipalName, in a verified domain of the tenant"`
-	Manager    string `json:"manager,omitempty" jsonschema:"writes, set_manager: the manager's object id (a GUID)"`
+	MustChange *bool    `json:"must_change,omitempty" jsonschema:"writes, reset_password: make the user change the password at next sign-in; default true"`
+	MethodID   string   `json:"method_id,omitempty" jsonschema:"writes, delete_auth_method: the id of the authentication method, from auth_methods"`
+	UPN        string   `json:"upn,omitempty" jsonschema:"writes, create: the new user's userPrincipalName, in a verified domain of the tenant"`
+	Manager    string   `json:"manager,omitempty" jsonschema:"writes, set_manager: the manager's object id (a GUID)"`
+	Skus       []string `json:"skus,omitempty" jsonschema:"writes, assign_license, remove_license: 1 to 20 skuIds (GUIDs), from entra_license skus"`
 	// On entra_user and entra_group.
 	Name       string            `json:"name,omitempty" jsonschema:"writes, create: the new object's displayName"`
 	Properties map[string]string `json:"properties,omitempty" jsonschema:"writes, create, edit: properties to set by Graph name, from the allowlist the tool description gives; on edit an empty value clears one"`
@@ -403,6 +404,7 @@ func init() {
 			entraResetPassword, entraIssueTAP, entraDeleteAuthMethod,
 			entraCreate(entraUsers), entraEdit(entraUsers), entraManager("set_manager"), entraManager("remove_manager"),
 			entraDelete(entraUsers), entraRestore(entraUsers),
+			entraLicense("assign_license"), entraLicense("remove_license"), entraLicense("reprocess_licenses"),
 		),
 		entraTool("entra_group", "identity", "Entra ID groups",
 			"Groups of the tenant. search: list groups as briefs (id, displayName, mail, securityEnabled, mailEnabled, "+
@@ -438,7 +440,7 @@ func init() {
 			entraAction{Action{Name: "owners", Perms: deviceRead}, related(entraDevices, "/registeredOwners", directoryObjects)},
 			entraAction{Action{Name: "managed_search", Perms: intuneRead, Licence: "Intune"}, entraSearch(entraManaged)},
 			entraAction{Action{Name: "managed_get", Perms: intuneRead, Licence: "Intune"}, entraGet(entraManaged)},
-			entraDelete(entraDevices),
+			entraDelete(entraDevices), entraDeviceState("disable"), entraDeviceState("enable"),
 		),
 		Tool{Name: "entra_api", Group: "core", Actions: []Action{{Name: "get"}, {Name: "post", Capabilities: entraCapabilities()},
 			{Name: "patch", Capabilities: entraCapabilities()}, {Name: "put", Capabilities: entraCapabilities()}, {Name: "delete", Capabilities: entraCapabilities()}},

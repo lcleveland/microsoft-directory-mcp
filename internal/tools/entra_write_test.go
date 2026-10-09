@@ -644,3 +644,119 @@ func TestEntraObjectsRegister(t *testing.T) {
 		t.Errorf("entra_device: %v", p)
 	}
 }
+
+const sku1 = "00000000-0000-0000-0000-0000000000f1"
+
+// Licences are assigned and removed through assignLicense and reprocessed,
+// on cloud and synced users alike; protected targets are refused.
+func TestEntraLicenses(t *testing.T) {
+	d, _, _ := entraWriteDeps(t, "", "entra-licenses")
+	d, bodies := entraBodies(t, d, "")
+	for _, c := range []struct {
+		a  entraAction
+		id string
+	}{{entraLicense("assign_license"), u1}, {entraLicense("assign_license"), u2}, {entraLicense("remove_license"), u2}, {entraLicense("reprocess_licenses"), u2}} {
+		if _, err := entraCall(d, c.a, entraIn{ID: c.id, Skus: []string{sku1}}); err != nil {
+			t.Fatalf("%s: %v", c.a.Name, err)
+		}
+	}
+	if want := []string{
+		`POST /v1.0/users/` + u1 + `/assignLicense {"addLicenses":[{"disabledPlans":[],"skuId":"` + sku1 + `"}],"removeLicenses":[]}`,
+		`POST /v1.0/users/` + u2 + `/assignLicense {"addLicenses":[{"disabledPlans":[],"skuId":"` + sku1 + `"}],"removeLicenses":[]}`,
+		`POST /v1.0/users/` + u2 + `/assignLicense {"addLicenses":[],"removeLicenses":["` + sku1 + `"]}`,
+		`POST /v1.0/users/` + u2 + `/reprocessLicenseAssignment {}`,
+	}; !slices.Equal(bodies(), want) {
+		t.Errorf("wrote %q, want %q", bodies(), want)
+	}
+	for _, tc := range []struct {
+		name string
+		in   entraIn
+		says string
+	}{
+		{"protected", entraIn{ID: u3, Skus: []string{sku1}}, "protected target"},
+		{"no sku", entraIn{ID: u1}, "takes 1 to 20 skus, got 0"},
+		{"not a GUID", entraIn{ID: u1, Skus: []string{"SKU-NAME"}}, "want a skuId"},
+	} {
+		d, _, writes := entraWriteDeps(t, "", "entra-licenses")
+		_, err := entraCall(d, entraLicense("assign_license"), tc.in)
+		if err == nil || !strings.Contains(err.Error(), tc.says) || len(writes()) != 0 {
+			t.Errorf("%s: %v, wrote %v", tc.name, err, writes())
+		}
+	}
+}
+
+// A cloud device is enabled and disabled; a synced one is routed to AD.
+func TestEntraDeviceState(t *testing.T) {
+	d, _, _ := entraWriteDeps(t, "", "entra-devices")
+	d, bodies := entraBodies(t, d, "")
+	for _, a := range []string{"disable", "enable"} {
+		if _, err := entraCall(d, entraDeviceState(a), entraIn{ID: dv1}); err != nil {
+			t.Fatal(err)
+		}
+		d, _, writes := entraWriteDeps(t, "", "entra-devices")
+		if _, err := entraCall(d, entraDeviceState(a), entraIn{ID: dv2}); err == nil ||
+			!strings.Contains(err.Error(), "call ad_computer disable or enable") || len(writes()) != 0 {
+			t.Errorf("synced device %s: %v, wrote %v", a, err, writes())
+		}
+	}
+	if want := []string{`PATCH /v1.0/devices/` + dv1 + ` {"accountEnabled":false}`, `PATCH /v1.0/devices/` + dv1 + ` {"accountEnabled":true}`}; !slices.Equal(bodies(), want) {
+		t.Errorf("wrote %v", bodies())
+	}
+}
+
+// Risk is dismissed or confirmed for one user by object id, synced users
+// included; protected targets are refused.
+func TestEntraRisk(t *testing.T) {
+	d, _, _ := entraWriteDeps(t, "", "entra-risk")
+	d, bodies := entraBodies(t, d, "")
+	for _, a := range []string{"dismiss", "confirm_compromised"} {
+		if _, err := entraCall(d, entraRiskAction(a), entraIn{ID: u2}); err != nil {
+			t.Fatalf("%s: %v", a, err)
+		}
+	}
+	if want := []string{
+		`POST /v1.0/identityProtection/riskyUsers/dismiss {"userIds":["` + u2 + `"]}`,
+		`POST /v1.0/identityProtection/riskyUsers/confirmCompromised {"userIds":["` + u2 + `"]}`,
+	}; !slices.Equal(bodies(), want) {
+		t.Errorf("wrote %q, want %q", bodies(), want)
+	}
+	for _, tc := range []struct {
+		name, id, says string
+	}{
+		{"protected", u3, "protected target"},
+		{"UPN", "user@example.com", "want the user's object id"},
+	} {
+		d, _, writes := entraWriteDeps(t, "", "entra-risk")
+		_, err := entraCall(d, entraRiskAction("dismiss"), entraIn{ID: tc.id})
+		if err == nil || !strings.Contains(err.Error(), tc.says) || len(writes()) != 0 {
+			t.Errorf("%s: %v, wrote %v", tc.name, err, writes())
+		}
+	}
+}
+
+// With the three capabilities on, their actions show; risk writes are
+// hidden without P2.
+func TestEntraLicensesDevicesRiskRegister(t *testing.T) {
+	caps := []string{"entra-licenses", "entra-devices", "entra-risk"}
+	cs, _ := entraSession(t, nil, func(*http.Request) string { return `{}` }, caps...)
+	got := listed(t, cs)
+	for name, want := range map[string][]string{
+		"entra_user":   {"assign_license", "remove_license", "reprocess_licenses"},
+		"entra_device": {"disable", "enable"},
+		"entra_risk":   {"confirm_compromised", "dismiss"},
+	} {
+		if g := got[name]; len(g) < len(want) || !slices.Equal(g[len(g)-len(want):], want) {
+			t.Errorf("%s: %v, want it to end %v", name, g, want)
+		}
+	}
+	if p := props(t, cs, "entra_user"); !slices.Contains(p, "skus") || slices.Contains(p, "confirm") {
+		t.Errorf("entra_user: %v", p)
+	}
+	if p := props(t, cs, "entra_risk"); !slices.Contains(p, "reason") {
+		t.Errorf("entra_risk: %v", p)
+	}
+	cs, _ = entraSession(t, &graph.Probe{Licences: map[string]string{"P2": graph.Absent}}, func(*http.Request) string { return `{}` }, caps...)
+	if g := listed(t, cs)["entra_risk"]; slices.Contains(g, "dismiss") || slices.Contains(g, "confirm_compromised") {
+		t.Errorf("entra_risk without P2: %v", g)
+	}
+}
