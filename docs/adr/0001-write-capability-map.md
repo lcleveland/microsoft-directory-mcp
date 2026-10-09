@@ -24,7 +24,7 @@ As a result the service principal only ever needs User Administrator, never Priv
 - Entra password reset on a synced user needs writeback to be declared on.
 - AD writes to an object whose counterpart is cloud-managed are refused.
 
-**Raw tools never bypass the rails.** In `ad_api` and `entra_api`, a write that a first-class action covers is refused and pointed to that action. Raw writes are left with `ad-objects` allowlisted attribute edits on any class, and v1.0 Graph paths that map to an enabled capability. Every other raw write is refused.
+**Raw tools never bypass the rails.** In `ad_api` and `entra_api`, a write that a first-class action covers is refused and pointed to that action. Raw writes are left with `ad-objects` allowlisted attribute edits on any class (an `ad_api` modify), and `entra-objects` allowlisted property edits on a user or group (an `entra_api` PATCH). Every other raw write is refused.
 
 **Never exposed:**
 - **AD:** other UAC bits, SPNs, key credentials, RBCD, sIDHistory, ACLs, cross-domain moves, tree delete, AdminSDHolder, dSHeuristics, GPO content, schema and config, trusts.
