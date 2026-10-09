@@ -27,7 +27,7 @@ import (
 // "writes, a, b: " is left out of the schema until one of its writes shows.
 type writeIn struct {
 	Reason  string `json:"reason,omitempty" jsonschema:"writes: why you are making this change; required, and recorded in the audit log"`
-	Confirm string `json:"confirm,omitempty" jsonschema:"writes, reset_password, delete: the target's name exactly (an AD object's sAMAccountName, an Entra user's userPrincipalName), to confirm it is the one you mean"`
+	Confirm string `json:"confirm,omitempty" jsonschema:"writes, reset_password, delete: the target's name exactly (an AD object's sAMAccountName, an Entra user's userPrincipalName, an Entra group's or device's displayName), to confirm it is the one you mean"`
 }
 
 var errReason = errors.New("reason is required for writes: say why, it is recorded in the audit log")
