@@ -44,7 +44,13 @@ type Entra struct {
 	Cloud    string
 	LoginURL string // no trailing slash
 	GraphURL string
+	// PasswordWriteback is operator-declared (on, off or unknown): app-only
+	// Graph cannot detect it. See docs/research/password-writeback-signal.md.
+	PasswordWriteback string
 }
+
+// Groups are the tool groups, in roster order. core is always on.
+var Groups = []string{"core", "identity", "security", "policy", "devices", "infra"}
 
 type Config struct {
 	AD    *AD    // nil when the side is off
@@ -58,8 +64,14 @@ type Config struct {
 	Path          string
 	HTTPAuthToken string // bearer HTTP clients must send; empty means none
 
+	ToolGroups map[string]bool // enabled groups; core always
+	NoProbe    bool            // skip the startup probe and show everything
+
 	ShowVersion bool
 }
+
+// GroupOn reports whether tool group g is enabled.
+func (c *Config) GroupOn(g string) bool { return c.ToolGroups[g] }
 
 // LogValue keeps secrets out of logs however the config is printed.
 func (c *Config) LogValue() slog.Value {
@@ -68,6 +80,8 @@ func (c *Config) LogValue() slog.Value {
 		slog.Bool("http", c.HTTP),
 		slog.String("addr", c.Addr),
 		slog.Bool("http_auth_set", c.HTTPAuthToken != ""),
+		slog.Any("tool_groups", slices.Sorted(maps.Keys(c.ToolGroups))),
+		slog.Bool("no_probe", c.NoProbe),
 	}
 	if a := c.AD; a != nil {
 		attrs = append(attrs, slog.Group("ad",
@@ -87,6 +101,7 @@ func (c *Config) LogValue() slog.Value {
 			slog.String("cloud", e.Cloud),
 			slog.String("login_url", e.LoginURL),
 			slog.String("graph_url", e.GraphURL),
+			slog.String("password_writeback", e.PasswordWriteback),
 		))
 	}
 	return slog.GroupValue(attrs...)
@@ -106,6 +121,7 @@ func Parse(args []string, getenv func(string) string) (*Config, []string, error)
 		graphURL string
 		logLevel string
 		hauth    string
+		groups   string
 		stdio    bool
 		warnings []string
 	)
@@ -132,6 +148,9 @@ func Parse(args []string, getenv func(string) string) (*Config, []string, error)
 	str(&e.Cloud, "entra-cloud", "global", strings.Join(clouds, "|"))
 	str(&login, "entra-login-url", "", "login base URL, instead of the cloud's (tests)")
 	str(&graphURL, "entra-graph-url", "", "Graph base URL, instead of the cloud's (tests)")
+	str(&e.PasswordWriteback, "entra-password-writeback", "unknown", "on|off|unknown, operator-declared (Graph cannot detect it)")
+	str(&groups, "tool-groups", strings.Join(Groups, ","), "comma-separated tool groups to enable; core is always on")
+	fs.BoolVar(&c.NoProbe, "no-probe", false, "skip the startup probe and show every action")
 	fs.DurationVar(&c.RequestTimeout, "request-timeout", 30*time.Second, "per-request timeout")
 	str(&logLevel, "log-level", "info", "debug|info|warn|error")
 	fs.BoolVar(&stdio, "stdio", false, "serve over stdio (default)")
@@ -159,6 +178,16 @@ func Parse(args []string, getenv func(string) string) (*Config, []string, error)
 	}
 	if err := c.LogLevel.UnmarshalText([]byte(logLevel)); err != nil {
 		return nil, nil, fmt.Errorf("--log-level: %w", err)
+	}
+	c.ToolGroups = map[string]bool{"core": true}
+	for g := range strings.SplitSeq(groups, ",") {
+		if g = strings.TrimSpace(g); g == "" {
+			continue
+		}
+		if !slices.Contains(Groups, g) {
+			return nil, nil, fmt.Errorf("--tool-groups: unknown group %q (want %s)", g, strings.Join(Groups, ", "))
+		}
+		c.ToolGroups[g] = true
 	}
 	if a.Forest == "" && e.Tenant == "" {
 		return nil, nil, errors.New("neither side is configured: set --ad-forest, --entra-tenant or both")
@@ -198,6 +227,9 @@ func Parse(args []string, getenv func(string) string) (*Config, []string, error)
 			return nil, nil, errors.New("--entra-client-id is required with --entra-tenant")
 		case certFile == "":
 			return nil, nil, errors.New("--entra-cert-file is required with --entra-tenant")
+		}
+		if !slices.Contains([]string{"on", "off", "unknown"}, e.PasswordWriteback) {
+			return nil, nil, fmt.Errorf("--entra-password-writeback: want on, off or unknown, got %q", e.PasswordWriteback)
 		}
 		hosts, ok := graph.Clouds[e.Cloud]
 		if !ok {

@@ -180,3 +180,38 @@ func TestLogValueHidesSecrets(t *testing.T) {
 		}
 	}
 }
+
+func TestToolGroups(t *testing.T) {
+	c, _, err := Parse(entraArgs(t), noenv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range Groups {
+		if !c.GroupOn(g) {
+			t.Errorf("%s off by default", g)
+		}
+	}
+	if c.NoProbe || c.Entra.PasswordWriteback != "unknown" {
+		t.Errorf("defaults: no_probe %v writeback %q", c.NoProbe, c.Entra.PasswordWriteback)
+	}
+
+	c, _, err = Parse(append(entraArgs(t), "--tool-groups", "identity, policy", "--no-probe", "--entra-password-writeback", "on"), noenv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// core is always on.
+	for g, want := range map[string]bool{"core": true, "identity": true, "policy": true, "security": false, "devices": false, "infra": false} {
+		if c.GroupOn(g) != want {
+			t.Errorf("%s: want %v", g, want)
+		}
+	}
+	if !c.NoProbe || c.Entra.PasswordWriteback != "on" {
+		t.Errorf("no_probe %v writeback %q", c.NoProbe, c.Entra.PasswordWriteback)
+	}
+
+	for _, bad := range [][]string{{"--tool-groups", "identity,nope"}, {"--entra-password-writeback", "maybe"}} {
+		if _, _, err := Parse(append(entraArgs(t), bad...), noenv); err == nil {
+			t.Errorf("%v accepted", bad)
+		}
+	}
+}
