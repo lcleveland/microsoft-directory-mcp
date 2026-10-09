@@ -8,8 +8,8 @@
 #                            with a roles claim; /organization, and the probe's
 #                            subscribedSkus (no P1), managedDevices and signIns (403);
 #                            /users in two nextLink pages, the second 429 once;
-#                            a user by id or UPN, a group's members, /devices
-#                            and /beta/organization
+#                            a user by id or UPN, a group's members, /devices,
+#                            /beta/organization, and apps and SPs with credentials
 #   microsoft-directory-mcp  the module's HTTP service
 #
 # One full MCP session calls ad_status (a simple bind over LDAPS, trusting
@@ -37,8 +37,8 @@ let
   # The certificate half of the Entra fixture, readable by the stub.
   certPublic = "/run/entra-cert-public.pem";
   # An unsigned JWT the server decodes for the startup probe. Payload:
-  # {"aud":"https://graph.microsoft.com","roles":["Organization.Read.All","User.Read.All","LicenseAssignment.Read.All","GroupMember.Read.All","Device.Read.All"]}
-  accessToken = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJhdWQiOiJodHRwczovL2dyYXBoLm1pY3Jvc29mdC5jb20iLCJyb2xlcyI6WyJPcmdhbml6YXRpb24uUmVhZC5BbGwiLCJVc2VyLlJlYWQuQWxsIiwiTGljZW5zZUFzc2lnbm1lbnQuUmVhZC5BbGwiLCJHcm91cE1lbWJlci5SZWFkLkFsbCIsIkRldmljZS5SZWFkLkFsbCJdfQ.stub";
+  # {"aud":"https://graph.microsoft.com","roles":["Organization.Read.All","User.Read.All","LicenseAssignment.Read.All","GroupMember.Read.All","Device.Read.All","Application.Read.All"]}
+  accessToken = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJhdWQiOiJodHRwczovL2dyYXBoLm1pY3Jvc29mdC5jb20iLCJyb2xlcyI6WyJPcmdhbml6YXRpb24uUmVhZC5BbGwiLCJVc2VyLlJlYWQuQWxsIiwiTGljZW5zZUFzc2lnbm1lbnQuUmVhZC5BbGwiLCJHcm91cE1lbWJlci5SZWFkLkFsbCIsIkRldmljZS5SZWFkLkFsbCIsIkFwcGxpY2F0aW9uLlJlYWQuQWxsIl19.stub";
 
   # Seed data, ldbadd-ed into sam.ldb at provisioning: 250 users (more than
   # one page), vm-team with five users and the nested vm-sub (two more);
@@ -148,6 +148,21 @@ let
                      "deviceId": "00000000-0000-0000-0000-000000000301",
                      "displayName": "entra-device1", "operatingSystem": "Windows"}],
     }
+
+
+    # Credentials ending 10 and 90 days after the stub starts, and an expired one.
+    def days(n):
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + n * 86400))
+
+
+    SEED["applications"] = [{"id": "00000000-0000-0000-0000-000000000501", "appId": "00000000-0000-0000-0000-000000000601",
+                             "displayName": "vm-app", "passwordCredentials": [
+                                 {"keyId": "00000000-0000-0000-0000-000000000701", "displayName": "soon", "endDateTime": days(10), "hint": "abc"},
+                                 {"keyId": "00000000-0000-0000-0000-000000000702", "displayName": "late", "endDateTime": days(90), "hint": "abc"}],
+                             "keyCredentials": []}]
+    SEED["servicePrincipals"] = [{"id": "00000000-0000-0000-0000-000000000502", "appId": "00000000-0000-0000-0000-000000000601",
+                                  "displayName": "vm-app", "passwordCredentials": [], "keyCredentials": [
+                                      {"keyId": "00000000-0000-0000-0000-000000000703", "endDateTime": days(-1), "key": "MIIC"}]}]
     # A group of user 1 and the device.
     SEED["members"] = {"00000000-0000-0000-0000-000000000401": [SEED["users"][0], SEED["devices"][0]]}
     THROTTLED = set()
@@ -255,6 +270,8 @@ let
         ("GET", "/v1.0/auditLogs/signIns"): no_premium,
         ("GET", "/v1.0/users"): users,
         ("GET", "/v1.0/devices"): listing("devices"),
+        ("GET", "/v1.0/applications"): listing("applications"),
+        ("GET", "/v1.0/servicePrincipals"): listing("servicePrincipals"),
         ("GET", "/beta/organization"): organization,
     }
     # (method, path pattern) -> handler(h, query, the pattern's group).
@@ -355,7 +372,7 @@ let
     _, listed = post({"jsonrpc": "2.0", "id": next(ids), "method": "tools/list"}, session)
     tools = sorted(t["name"] for t in listed["result"]["tools"])
     assert tools == ["ad_api", "ad_computer", "ad_gpo", "ad_group", "ad_object", "ad_ou", "ad_policy", "ad_status", "ad_topology", "ad_user",
-                     "entra_api", "entra_device", "entra_group", "entra_status", "entra_user"], tools
+                     "entra_api", "entra_app", "entra_device", "entra_group", "entra_license", "entra_org", "entra_status", "entra_user"], tools
 
     ad = call("ad_status", {})
     print("ad_status", json.dumps(ad))
@@ -375,13 +392,14 @@ let
     # The startup probe: the roles claim decoded, P1 absent from subscribedSkus,
     # Intune present from its read probe. Later issues assert their hidden actions.
     probe = entra["probe"]
-    assert probe["roles"] == ["Organization.Read.All", "User.Read.All", "LicenseAssignment.Read.All", "GroupMember.Read.All", "Device.Read.All"], probe
+    assert probe["roles"] == ["Organization.Read.All", "User.Read.All", "LicenseAssignment.Read.All", "GroupMember.Read.All", "Device.Read.All", "Application.Read.All"], probe
     assert probe["licences"] == {"P1": "absent", "P2": "absent", "Intune": "present"}, probe
     assert "group_reads" not in probe and "notes" not in probe, probe
     assert entra["enabled_groups"] == ["core", "identity", "security", "policy", "devices", "infra"], entra
-    assert entra["password_writeback"] == {"value": "unknown", "source": "operator-declared"}, entra
+    assert entra["password_writeback"] == {"value": "on", "source": "operator-declared"}, entra
     hidden = sorted(h["tool"] + " " + h["action"] for h in entra["hidden_actions"])
-    assert hidden == ["entra_device managed_get", "entra_device managed_search", "entra_user auth_methods", "entra_user registration"], hidden
+    assert hidden == ["entra_device managed_get", "entra_device managed_search", "entra_role assignments", "entra_role definitions",
+                      "entra_role eligibility", "entra_user auth_methods", "entra_user registration"], hidden
     assert ad["probe"]["bound"], ad
     assert {"dns": "corp.example.com", "netbios": "CORP", "dn": "DC=corp,DC=example,DC=com"} in ad["probe"]["domains"], ad
     assert ad["probe"]["reads"] == {"pso-read": "ok"}, ad["probe"]
@@ -501,6 +519,18 @@ let
     beta = call("entra_api", {"action": "get", "path": "/beta/organization"})
     assert beta["results"][0]["displayName"] == "Example Org" and "beta" in beta["_unstable"], beta
     assert "_unstable" not in call("entra_api", {"action": "get", "path": "/v1.0/organization"})
+
+    # Credentials ending within 30 days: only the app's "soon" secret, without its hint.
+    exp = call("entra_app", {"action": "expiring_credentials", "days": 30})
+    print("entra_app expiring_credentials", json.dumps(exp))
+    assert [(r["kind"], r["displayName"], r["credential"], r["credentialName"]) for r in exp["results"]] == [("app", "vm-app", "password", "soon")], exp
+    assert "hint" not in exp["results"][0], exp
+    org = call("entra_org", {"action": "info"})
+    print("entra_org info", json.dumps(org))
+    assert org["displayName"] == "Example Org" and org["onPremisesSyncEnabled"] is True, org
+    assert org["password_writeback"]["value"] == "on" and org["password_writeback"]["source"] == "operator-declared", org
+    # No AuditLog.Read.All in the token: the audit hint is unknown.
+    assert org["password_writeback"]["audit_hint"]["value"] == "unknown", org
     print("ok")
   '';
 
@@ -648,6 +678,7 @@ pkgs.testers.runNixOSTest {
           certFile = "/run/entra-cert.pem";
           loginUrl = "http://127.0.0.1:${toString stubPort}";
           graphUrl = "http://127.0.0.1:${toString stubPort}";
+          passwordWriteback = "on";
         };
       };
     };

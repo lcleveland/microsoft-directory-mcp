@@ -81,10 +81,14 @@ func TestEntraReadRosterRegisters(t *testing.T) {
 	cs, _ := entraSession(t, nil, func(*http.Request) string { return `{}` })
 	got := listed(t, cs)
 	for name, want := range map[string][]string{
-		"entra_user":   {"search", "get", "member_of", "devices", "licenses", "auth_methods", "registration"},
-		"entra_group":  {"search", "get", "members", "owners"},
-		"entra_device": {"search", "get", "owners", "managed_search", "managed_get"},
-		"entra_api":    {"get"},
+		"entra_user":    {"search", "get", "member_of", "devices", "licenses", "auth_methods", "registration"},
+		"entra_group":   {"search", "get", "members", "owners"},
+		"entra_device":  {"search", "get", "owners", "managed_search", "managed_get"},
+		"entra_api":     {"get"},
+		"entra_app":     {"search_sps", "get_sp", "search_apps", "get_app", "expiring_credentials"},
+		"entra_role":    {"definitions", "assignments", "eligibility"},
+		"entra_license": {"skus"},
+		"entra_org":     {"info"},
 	} {
 		if !slices.Equal(got[name], want) {
 			t.Errorf("%s: actions %v, want %v", name, got[name], want)

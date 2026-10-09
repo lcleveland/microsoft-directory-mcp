@@ -93,6 +93,8 @@ type entraIn struct {
 	Cursor string   `json:"cursor,omitempty" jsonschema:"next_cursor from the previous call with the same arguments, unchanged"`
 	// Only on entra_group.
 	Transitive bool `json:"transitive,omitempty" jsonschema:"entra_group members: every nested member, not only direct ones"`
+	// Only on entra_app.
+	Days int `json:"days,omitempty" jsonschema:"entra_app expiring_credentials: the window in days from now (default 30)"`
 }
 
 func (in entraIn) params(def []string) graph.Params {
