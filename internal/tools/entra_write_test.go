@@ -92,6 +92,7 @@ const (
 	// dv1 is a cloud device, dv2 a synced one.
 	dv1 = "00000000-0000-0000-0000-0000000000e1"
 	dv2 = "00000000-0000-0000-0000-0000000000e2"
+	md1 = "00000000-0000-0000-0000-0000000000e3" // an Intune managed device
 )
 
 // entraWriteStub answers the pre-reads of the users and groups above, the
@@ -125,6 +126,8 @@ func entraWriteStub(write string) func(*http.Request) string {
 			return `{"id":"` + g1 + `","displayName":"staff"}`
 		case path.Base(p) == dv1:
 			return `{"id":"` + dv1 + `","displayName":"pc1"}`
+		case path.Base(p) == md1:
+			return `{"id":"` + md1 + `","deviceName":"laptop1"}`
 		case path.Base(p) == dv2:
 			return `{"id":"` + dv2 + `","displayName":"pc2","onPremisesSyncEnabled":true,"onPremisesSecurityIdentifier":"S-1-5-21-1-2-3-1107"}`
 		case path.Base(p) == g2:
@@ -758,5 +761,67 @@ func TestEntraLicensesDevicesRiskRegister(t *testing.T) {
 	cs, _ = entraSession(t, &graph.Probe{Licences: map[string]string{"P2": graph.Absent}}, func(*http.Request) string { return `{}` }, caps...)
 	if g := listed(t, cs)["entra_risk"]; slices.Contains(g, "dismiss") || slices.Contains(g, "confirm_compromised") {
 		t.Errorf("entra_risk without P2: %v", g)
+	}
+}
+
+// Sync, reboot, retire and wipe are each one POST to the managed device,
+// dispatched and said so; retire and wipe need confirm, its deviceName, and
+// wipe sends Graph's defaults only.
+func TestIntuneActions(t *testing.T) {
+	d, _, _ := entraWriteDeps(t, "", "intune-device-actions", "intune-retire-wipe")
+	d, bodies := entraBodies(t, d, "")
+	for _, a := range []string{"sync", "reboot", "retire", "wipe"} {
+		in := entraIn{ID: md1}
+		if a == "retire" || a == "wipe" {
+			in.Confirm = "LAPTOP1"
+		}
+		out, err := entraCall(d, intuneAction(a), in)
+		if err != nil {
+			t.Fatalf("%s: %v", a, err)
+		}
+		if s, _ := out["dispatched"].(string); !strings.Contains(s, "do not repeat") || out["name"] != "laptop1" {
+			t.Errorf("%s: %v", a, out)
+		}
+	}
+	m := "POST /v1.0/deviceManagement/managedDevices/" + md1
+	if want := []string{m + "/syncDevice ", m + "/rebootNow ", m + "/retire ", m + "/wipe {}"}; !slices.Equal(bodies(), want) {
+		t.Errorf("wrote %q, want %q", bodies(), want)
+	}
+	for _, a := range []string{"retire", "wipe"} {
+		for _, confirm := range []string{"", "laptop2"} {
+			d, _, writes := entraWriteDeps(t, "", "intune-retire-wipe")
+			_, err := entraCall(d, intuneAction(a), entraIn{ID: md1, writeIn: writeIn{Confirm: confirm}})
+			if err == nil || !strings.Contains(err.Error(), `confirm must be the target's deviceName: `+md1+` is "laptop1"`) || len(writes()) != 0 {
+				t.Errorf("%s confirm %q: %v, wrote %v", a, confirm, err, writes())
+			}
+		}
+	}
+	d, _, writes := entraWriteDeps(t, "", "intune-device-actions")
+	if _, err := entraCall(d, intuneAction("wipe"), entraIn{ID: md1, writeIn: writeIn{Confirm: "laptop1"}}); err == nil ||
+		!strings.Contains(err.Error(), "intune-retire-wipe capability") || len(writes()) != 0 {
+		t.Errorf("wipe without its capability: %v, wrote %v", err, writes())
+	}
+}
+
+// With both capabilities on, the actions show, retire and wipe taking
+// confirm; without Intune or the permission they are hidden.
+func TestIntuneActionsRegister(t *testing.T) {
+	caps := []string{"intune-device-actions", "intune-retire-wipe"}
+	actions := []string{"sync", "reboot", "retire", "wipe"}
+	cs, _ := entraSession(t, nil, func(*http.Request) string { return `{}` }, caps...)
+	if g := listed(t, cs)["entra_device"]; len(g) < 4 || !slices.Equal(g[len(g)-4:], actions) {
+		t.Errorf("entra_device: %v", g)
+	}
+	if p := props(t, cs, "entra_device"); !slices.Contains(p, "confirm") || !slices.Contains(p, "reason") {
+		t.Errorf("entra_device: %v", p)
+	}
+	for name, probe := range map[string]*graph.Probe{
+		"no Intune":     {Licences: map[string]string{"Intune": graph.Absent}},
+		"no permission": {Roles: []string{"DeviceManagementManagedDevices.Read.All"}},
+	} {
+		cs, _ := entraSession(t, probe, func(*http.Request) string { return `{}` }, caps...)
+		if g := listed(t, cs)["entra_device"]; slices.ContainsFunc(g, func(a string) bool { return slices.Contains(actions, a) }) {
+			t.Errorf("%s: %v", name, g)
+		}
 	}
 }
