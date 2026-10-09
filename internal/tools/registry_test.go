@@ -20,6 +20,8 @@ import (
 
 type fakeIn struct {
 	ActionParam
+	Reason  string `json:"reason,omitempty" jsonschema:"writes: why"`
+	Confirm string `json:"confirm,omitempty" jsonschema:"writes, wipe: the target's name"`
 }
 
 // fakeRoster stands in for the real one: two Entra tools in different
@@ -42,6 +44,8 @@ func fakeRoster() []Tool {
 		{Name: "ad_fake", Group: "identity", add: add, Actions: []Action{
 			{Name: "get"},
 			{Name: "psos", ADProbe: "pso-read"},
+			{Name: "disable", Capabilities: []string{"ad-account-state"}},
+			{Name: "wipe", Capabilities: []string{"ad-delete"}},
 		}},
 	}
 }
@@ -97,6 +101,25 @@ func session(t *testing.T, cfg *config.Config, d Deps) *mcp.ClientSession {
 	}
 	t.Cleanup(func() { cs.Close() })
 	return cs
+}
+
+// props lists a tool's input properties, sorted.
+func props(t *testing.T, cs *mcp.ClientSession, tool string) []string {
+	t.Helper()
+	res, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, tl := range res.Tools {
+		if tl.Name == tool {
+			for p := range tl.InputSchema.(map[string]any)["properties"].(map[string]any) {
+				out = append(out, p)
+			}
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 // listed maps each listed tool to its action enum.
@@ -248,4 +271,57 @@ func anyStrings(v any) []string {
 		out = append(out, x.(string))
 	}
 	return out
+}
+
+// A write whose capability is off is not in the schema, not reported
+// hidden, and refused if called; its parameters are left out too. Enabling
+// the capability shows it and annotates the tool as a write.
+func TestCapabilityGatesWrites(t *testing.T) {
+	cs := session(t, &config.Config{NoProbe: true}, Deps{})
+	if got := listed(t, cs)["ad_fake"]; !slices.Equal(got, []string{"get", "psos"}) {
+		t.Errorf("writes off: actions %v", got)
+	}
+	if p := props(t, cs, "ad_fake"); !slices.Equal(p, []string{"action"}) {
+		t.Errorf("writes off: properties %v", p)
+	}
+	if h := hidden(status(t, cs, "ad_status")); len(h) != 0 {
+		t.Errorf("a disabled write is reported hidden: %q", h)
+	}
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "ad_fake", Arguments: map[string]any{"action": "wipe", "reason": "r"}})
+	// The SDK refuses it against the enum before the handler would.
+	if err != nil || !res.IsError || !strings.Contains(text(res), "wipe") {
+		t.Errorf("disabled write: %v %q", err, text(res))
+	}
+
+	cs = session(t, &config.Config{NoProbe: true, Capabilities: map[string]bool{"ad-account-state": true, "entra-risk": true}}, Deps{})
+	if got := listed(t, cs)["ad_fake"]; !slices.Equal(got, []string{"get", "psos", "disable"}) {
+		t.Errorf("ad-account-state on: actions %v", got)
+	}
+	// confirm serves only wipe, which is still off.
+	if p := props(t, cs, "ad_fake"); !slices.Equal(p, []string{"action", "reason"}) {
+		t.Errorf("ad-account-state on: properties %v", p)
+	}
+	res2, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tl := range res2.Tools {
+		if tl.Name == "ad_fake" && (tl.Annotations == nil || tl.Annotations.ReadOnlyHint || !*tl.Annotations.DestructiveHint) {
+			t.Errorf("ad_fake annotations %+v", tl.Annotations)
+		}
+	}
+	if c := status(t, cs, "ad_status")["enabled_capabilities"]; !slices.Equal(anyStrings(c), []string{"ad-account-state"}) {
+		t.Errorf("ad_status enabled_capabilities %v", c)
+	}
+	if c := status(t, cs, "entra_status")["enabled_capabilities"]; !slices.Equal(anyStrings(c), []string{"entra-risk"}) {
+		t.Errorf("entra_status enabled_capabilities %v", c)
+	}
+}
+
+func text(res *mcp.CallToolResult) string {
+	if res == nil || len(res.Content) == 0 {
+		return ""
+	}
+	t, _ := res.Content[0].(*mcp.TextContent)
+	return t.Text
 }

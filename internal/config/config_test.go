@@ -214,3 +214,18 @@ func TestToolGroups(t *testing.T) {
 		}
 	}
 }
+
+// Capabilities are all off by default; named ones turn on, unknown ones fail.
+func TestCapabilities(t *testing.T) {
+	c, _, err := Parse(adArgs(t), noenv)
+	if err != nil || len(c.Capabilities) != 0 {
+		t.Fatalf("default: %v %v", c.Capabilities, err)
+	}
+	c, _, err = Parse(append(adArgs(t), "--capabilities", "ad-account-state, entra-risk"), noenv)
+	if err != nil || len(c.Capabilities) != 2 || !c.Capabilities["ad-account-state"] || !c.Capabilities["entra-risk"] {
+		t.Errorf("named: %v %v", c.Capabilities, err)
+	}
+	if _, _, err := Parse(append(adArgs(t), "--capabilities", "ad-everything"), noenv); err == nil || !strings.Contains(err.Error(), "ad-everything") {
+		t.Errorf("unknown: %v", err)
+	}
+}

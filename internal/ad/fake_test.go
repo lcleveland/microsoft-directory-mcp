@@ -88,6 +88,52 @@ func (c *fakeConn) Search(req *ldap.SearchRequest) (*ldap.SearchResult, error) {
 	return res, nil
 }
 
+// Modify applies a modify to the fake tree. A delete of a value that isn't
+// there fails, as AD's does, so a delete-old/add-new pair is a compare-and-swap.
+func (c *fakeConn) Modify(req *ldap.ModifyRequest) error {
+	c.f.mu.Lock()
+	defer c.f.mu.Unlock()
+	dn := strings.ToLower(req.DN)
+	attrs, ok := c.f.tree[dn]
+	switch {
+	case !ok:
+		return ldap.NewError(ldap.LDAPResultNoSuchObject, errors.New("no such object"))
+	case c.f.denied[dn]:
+		return ldap.NewError(ldap.LDAPResultInsufficientAccessRights, errors.New("access denied"))
+	}
+	attrs = maps.Clone(attrs)
+	for _, ch := range req.Changes {
+		name, vals := ch.Modification.Type, ch.Modification.Vals
+		for k := range attrs {
+			if strings.EqualFold(k, name) {
+				name = k
+			}
+		}
+		switch ch.Operation {
+		case ldap.AddAttribute:
+			attrs[name] = append(slices.Clone(values(attrs, name)), vals...)
+		case ldap.ReplaceAttribute:
+			attrs[name] = vals
+		case ldap.DeleteAttribute:
+			kept := values(attrs, name)
+			for _, v := range vals {
+				i := slices.Index(kept, v)
+				if i < 0 {
+					return ldap.NewError(ldap.LDAPResultNoSuchAttribute, errors.New("no such value"))
+				}
+				kept = slices.Delete(slices.Clone(kept), i, i+1)
+			}
+			if len(vals) == 0 {
+				kept = nil
+			}
+			attrs[name] = kept
+		}
+	}
+	c.f.tree[dn] = attrs
+	c.f.modifies = append(c.f.modifies, c.host+" "+req.DN)
+	return nil
+}
+
 // selectAttrs keeps the requested attributes (all for none or *), slicing
 // a;range=lo-hi requests the way AD does.
 func selectAttrs(attrs map[string][]string, want []string) map[string][]string {

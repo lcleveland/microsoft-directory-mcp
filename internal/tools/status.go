@@ -2,8 +2,10 @@
 package tools
 
 import (
+	"cmp"
 	"context"
 	_ "embed"
+	"log/slog"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -19,7 +21,10 @@ type Deps struct {
 	Graph      *graph.Client // nil when the Entra side is off
 	ADProbe    *ad.Probe     // nil when not probed: everything shows
 	EntraProbe *graph.Probe  // nil when not probed: everything shows
+	Log        *slog.Logger  // the audit log of writes; nil means slog's default
 }
+
+func (d Deps) log() *slog.Logger { return cmp.Or(d.Log, slog.Default()) }
 
 // Register adds the tools of each configured side and returns how many.
 // A side that is off has no tools, and neither has a tool with no visible

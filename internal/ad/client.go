@@ -19,6 +19,7 @@ import (
 // Conn is the part of *ldap.Conn the transport uses; tests fake it.
 type Conn interface {
 	Search(*ldap.SearchRequest) (*ldap.SearchResult, error)
+	Modify(*ldap.ModifyRequest) error
 	IsClosing() bool
 	SetTimeout(time.Duration)
 	Close() error

@@ -427,6 +427,14 @@ let
         return res["structuredContent"]
 
 
+    def refused(name, args):
+        _, out = post({"jsonrpc": "2.0", "id": next(ids), "method": "tools/call",
+                       "params": {"name": name, "arguments": args}}, session)
+        res = out["result"]
+        assert res.get("isError"), f"{name} {args} was not refused: {res}"
+        return res["content"][0]["text"]
+
+
     _, listed = post({"jsonrpc": "2.0", "id": next(ids), "method": "tools/list"}, session)
     tools = sorted(t["name"] for t in listed["result"]["tools"])
     assert tools == ["ad_api", "ad_computer", "ad_gpo", "ad_group", "ad_object", "ad_ou", "ad_policy", "ad_status", "ad_topology", "ad_user",
@@ -613,6 +621,32 @@ let
     assert audit["results"][1]["targetResources"] == [{"displayName": "Entra User 1"}] and "id" not in audit["results"][1], audit
     added = call("entra_audit", {"action": "search", "filter": "activityDisplayName eq 'Add user'"})["results"]
     assert [a["initiatedBy"]["user"]["userPrincipalName"] for a in added] == ["admin@example.com"], added
+
+    # Writes: the server runs with --capabilities ad-account-state only.
+    assert ad["enabled_capabilities"] == ["ad-account-state"], ad
+    api = next(t for t in listed["result"]["tools"] if t["name"] == "ad_api")
+    assert api["inputSchema"]["properties"]["action"]["enum"] == ["search", "modify"], api
+    user = next(t for t in listed["result"]["tools"] if t["name"] == "ad_user")
+    assert user["inputSchema"]["properties"]["action"]["enum"][-5:] == ["disable", "enable", "unlock", "must_change", "set_expiry"], user
+    # ad-delete is off: absent from the schemas, and refused if called anyway.
+    print("ad_api delete", refused("ad_api", {"action": "delete", "dn": "${userDN 43}", "reason": "vm-test"}))
+    # Protected: a Domain Admins member, though the bind account could write it.
+    why = refused("ad_user", {"action": "disable", "id": "vmuser200", "reason": "vm-test protected"})
+    print("ad_user disable vmuser200", why)
+    assert "protected target" in why, why
+    # Raw: a password write is routed to the first-class action.
+    why = refused("ad_api", {"action": "modify", "dn": "${userDN 43}", "reason": "vm-test raw",
+                             "changes": [{"op": "replace", "attribute": "unicodePwd", "values": ["x"]}]})
+    print("ad_api modify unicodePwd", why)
+    assert "call ad_user reset_password instead" in why, why
+    assert "reason is required" in refused("ad_user", {"action": "disable", "id": "vmuser042"})
+    # vmuser042 (synced, so Entra follows on the next cycle): disable, then enable.
+    for action, enabled in (("disable", False), ("enable", True)):
+        w = call("ad_user", {"action": action, "id": "vmuser042", "reason": "vm-test " + action + " vmuser042"})
+        print("ad_user", action, json.dumps(w))
+        assert w["dc"] == "${dcHost}:636" and not w.get("fallback"), w
+        assert w["sync"].startswith("the change reaches its Entra counterpart " + synced["id"]), w
+        assert call("ad_user", {"action": "get", "id": "vmuser042", "fields": ["enabled"]})["enabled"] is enabled
     print("ok")
   '';
 
@@ -666,7 +700,15 @@ pkgs.testers.runNixOSTest {
             sed -i '/\[global\]/a old password allowed period = 0' ${smbConf}
             sed -i '/\[global\]/a tls keyfile = ${tlsDir}/key.pem\n\ttls certfile = ${tlsDir}/cert.pem\n\ttls cafile = ${tlsDir}/ca.pem' ${smbConf}
             samba-tool user create ${bindUser} '${bindPass}' -s ${smbConf}
+            # The bind account may write users under CN=Users; the seed users added next inherit it.
+            svcSid=$(ldbsearch -H /var/lib/samba-dc/private/sam.ldb '(sAMAccountName=${bindUser})' objectSid | sed -n 's/^objectSid: //p')
+            samba-tool dsacl set -H /var/lib/samba-dc/private/sam.ldb -s ${smbConf} \
+              --objectdn='CN=Users,${base}' --sddl="(A;CI;RPWP;;;$svcSid)"
             ldbadd -H /var/lib/samba-dc/private/sam.ldb ${seedLdif}
+            # Writes read tokenGroups to find protected-group members; the bind account needs this group for that.
+            samba-tool group addmembers 'Windows Authorization Access Group' ${bindUser} -s ${smbConf}
+            # A protected target: a Domain Admins member, though writable by the bind account.
+            samba-tool group addmembers 'Domain Admins' vmuser200 -s ${smbConf}
             ldbsearch -H /var/lib/samba-dc/private/sam.ldb '(sAMAccountName=vmuser042)' objectSid \
               | sed -n 's/^objectSid: //p' > ${syncedSid}
             grep -q '^S-1-5-21-' ${syncedSid}
@@ -750,6 +792,10 @@ pkgs.testers.runNixOSTest {
       services.microsoft-directory-mcp = {
         enable = true;
         logLevel = "debug";
+        extraArgs = [
+          "--capabilities"
+          "ad-account-state"
+        ];
         http.authTokenFile = "/run/mcp-bearer";
         ad = {
           forest = "corp.example.com";
@@ -802,5 +848,12 @@ pkgs.testers.runNixOSTest {
         assert "starting" in journal, journal
         for secret in ("${bindPass}", "${httpToken}", "${accessToken}"):
             assert secret not in journal, f"{secret} leaked into the journal"
+
+    with subtest("the writes are in the audit log with their reasons and outcomes"):
+        journal = machine.succeed("journalctl -o cat --no-pager -u microsoft-directory-mcp.service")
+        for line in ('reason="vm-test disable vmuser042"', 'reason="vm-test enable vmuser042"'):
+            assert any(line in x and "outcome=ok" in x and "dc=${dcHost}:636" in x and "capability=ad-account-state" in x
+                       for x in journal.splitlines()), line
+        assert any('reason="vm-test protected"' in x and 'outcome="not sent"' in x for x in journal.splitlines()), journal
   '';
 }

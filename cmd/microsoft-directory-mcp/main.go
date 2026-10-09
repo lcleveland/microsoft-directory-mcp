@@ -51,7 +51,7 @@ func run(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	d := tools.Deps{Config: cfg}
+	d := tools.Deps{Config: cfg, Log: log}
 	if cfg.AD != nil {
 		if d.AD, err = ad.New(cfg.AD, cfg.RequestTimeout); err != nil {
 			return err

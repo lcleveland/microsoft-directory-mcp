@@ -52,6 +52,14 @@ type Entra struct {
 // Groups are the tool groups, in roster order. core is always on.
 var Groups = []string{"core", "identity", "security", "policy", "devices", "infra"}
 
+// Capabilities are the write classes the operator can enable, all off by
+// default. See docs/adr/0001-write-capability-map.md.
+var Capabilities = []string{
+	"ad-account-state", "ad-passwords", "ad-group-membership", "ad-objects", "ad-delete", "ad-gpo-links", "ad-password-policy",
+	"entra-account-state", "entra-credentials", "entra-group-membership", "entra-objects", "entra-delete", "entra-licenses",
+	"entra-devices", "entra-risk", "intune-device-actions", "intune-retire-wipe",
+}
+
 type Config struct {
 	AD    *AD    // nil when the side is off
 	Entra *Entra // nil when the side is off
@@ -64,8 +72,9 @@ type Config struct {
 	Path          string
 	HTTPAuthToken string // bearer HTTP clients must send; empty means none
 
-	ToolGroups map[string]bool // enabled groups; core always
-	NoProbe    bool            // skip the startup probe and show everything
+	ToolGroups   map[string]bool // enabled groups; core always
+	Capabilities map[string]bool // enabled write capabilities
+	NoProbe      bool            // skip the startup probe and show everything
 
 	ShowVersion bool
 }
@@ -81,6 +90,7 @@ func (c *Config) LogValue() slog.Value {
 		slog.String("addr", c.Addr),
 		slog.Bool("http_auth_set", c.HTTPAuthToken != ""),
 		slog.Any("tool_groups", slices.Sorted(maps.Keys(c.ToolGroups))),
+		slog.Any("capabilities", slices.Sorted(maps.Keys(c.Capabilities))),
 		slog.Bool("no_probe", c.NoProbe),
 	}
 	if a := c.AD; a != nil {
@@ -122,6 +132,7 @@ func Parse(args []string, getenv func(string) string) (*Config, []string, error)
 		logLevel string
 		hauth    string
 		groups   string
+		caps     string
 		stdio    bool
 		warnings []string
 	)
@@ -149,6 +160,7 @@ func Parse(args []string, getenv func(string) string) (*Config, []string, error)
 	str(&graphURL, "entra-graph-url", "", "Graph base URL, instead of the cloud's (tests)")
 	str(&e.PasswordWriteback, "entra-password-writeback", "unknown", "on|off|unknown, operator-declared (Graph cannot detect it)")
 	str(&groups, "tool-groups", strings.Join(Groups, ","), "comma-separated tool groups to enable; core is always on")
+	str(&caps, "capabilities", "", "comma-separated write capabilities to enable ("+strings.Join(Capabilities, ", ")+"); none by default")
 	fs.BoolVar(&c.NoProbe, "no-probe", false, "skip the startup probe and show every action")
 	fs.DurationVar(&c.RequestTimeout, "request-timeout", 30*time.Second, "per-request timeout")
 	str(&logLevel, "log-level", "info", "debug|info|warn|error")
@@ -187,6 +199,16 @@ func Parse(args []string, getenv func(string) string) (*Config, []string, error)
 			return nil, nil, fmt.Errorf("--tool-groups: unknown group %q (want %s)", g, strings.Join(Groups, ", "))
 		}
 		c.ToolGroups[g] = true
+	}
+	c.Capabilities = map[string]bool{}
+	for w := range strings.SplitSeq(caps, ",") {
+		if w = strings.TrimSpace(w); w == "" {
+			continue
+		}
+		if !slices.Contains(Capabilities, w) {
+			return nil, nil, fmt.Errorf("--capabilities: unknown capability %q (want %s)", w, strings.Join(Capabilities, ", "))
+		}
+		c.Capabilities[w] = true
 	}
 	if a.Forest == "" && e.Tenant == "" {
 		return nil, nil, errors.New("neither side is configured: set --ad-forest, --entra-tenant or both")

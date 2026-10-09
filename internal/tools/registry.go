@@ -20,6 +20,13 @@ type Action struct {
 	Perms   []string // Entra application permissions, any of
 	Licence string   // P1, P2 or Intune
 	ADProbe string   // an ad.ReadProbes name
+	// Capabilities make it a write, shown only when one of them is enabled.
+	Capabilities []string
+}
+
+// capOn reports whether a's capability is enabled, or a is a read.
+func (d Deps) capOn(a Action) bool {
+	return len(a.Capabilities) == 0 || slices.ContainsFunc(a.Capabilities, func(c string) bool { return d.Config.Capabilities[c] })
 }
 
 // Tool is a roster entry. Its side is its name prefix (ad_ or entra_).
@@ -53,12 +60,16 @@ func (d Deps) sideOn(side string) bool {
 }
 
 // visibility splits t's actions into visible names and hidden ones with
-// reasons. A tool whose side or group is off has neither.
+// reasons. A tool whose side or group is off has neither, nor has a write
+// whose capability is off: it does not exist for the client.
 func (d Deps) visibility(t Tool) (visible []string, hidden []Hidden) {
 	if !d.sideOn(t.side()) || !d.Config.GroupOn(t.Group) {
 		return nil, nil
 	}
 	for _, a := range t.Actions {
+		if !d.capOn(a) {
+			continue
+		}
 		if why := d.why(t, a); why != "" {
 			hidden = append(hidden, Hidden{t.Name, a.Name, why})
 		} else {
@@ -97,8 +108,14 @@ type ActionParam struct {
 
 func (a ActionParam) action() string { return a.Action }
 
+// writeAnnotations mark a tool with a visible write.
+var writeAnnotations = &mcp.ToolAnnotations{DestructiveHint: new(true), OpenWorldHint: new(true)}
+
 // addActionTool registers def with its action enum cut to visible, and
-// refuses any other action if it is called anyway.
+// refuses any other action if it is called anyway. A write parameter (its
+// description starts "writes: " for every write, or "writes, a, b: " for
+// actions a and b) is left out of the schema when none of its writes is
+// visible; with a write visible the tool is annotated as one.
 func addActionTool[In interface{ action() string }, Out any](s *mcp.Server, d Deps, t Tool, def *mcp.Tool, visible []string, h mcp.ToolHandlerFor[In, Out]) {
 	schema, err := jsonschema.For[In](nil)
 	if err != nil {
@@ -109,10 +126,40 @@ func addActionTool[In interface{ action() string }, Out any](s *mcp.Server, d De
 		enum[i] = v
 	}
 	schema.Properties["action"].Enum = enum
+	var writes []string
+	for _, a := range t.Actions {
+		if len(a.Capabilities) > 0 && slices.Contains(visible, a.Name) {
+			writes = append(writes, a.Name)
+		}
+	}
+	for name, p := range schema.Properties {
+		head, _, ok := strings.Cut(p.Description, ": ")
+		serves, isWrite := strings.CutPrefix(head, "writes")
+		if !ok || !isWrite {
+			continue
+		}
+		used := len(writes) > 0
+		if serves = strings.TrimPrefix(serves, ", "); serves != "" {
+			used = slices.ContainsFunc(strings.Split(serves, ", "), func(a string) bool { return slices.Contains(writes, a) })
+		}
+		if !used {
+			delete(schema.Properties, name)
+		}
+	}
+	if len(writes) > 0 {
+		ann := *writeAnnotations
+		def.Annotations = &ann
+	}
 	def.InputSchema = schema
 	mcp.AddTool(s, def, func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, Out, error) {
 		if !slices.Contains(visible, in.action()) {
 			var zero Out
+			for _, a := range t.Actions {
+				if a.Name == in.action() && !d.capOn(a) {
+					return nil, zero, fmt.Errorf("%s %s is a write the operator has not enabled: it needs the %s capability (--capabilities)",
+						t.Name, a.Name, strings.Join(a.Capabilities, " or "))
+				}
+			}
 			_, hidden := d.visibility(t)
 			for _, x := range hidden {
 				if x.Action == in.action() {
@@ -127,16 +174,22 @@ func addActionTool[In interface{ action() string }, Out any](s *mcp.Server, d De
 
 // Visibility is what the *_status tools report about one side.
 type Visibility struct {
-	EnabledGroups  []string            `json:"enabled_groups"`
-	VisibleActions map[string][]string `json:"visible_actions"`
-	HiddenActions  []Hidden            `json:"hidden_actions"`
+	EnabledGroups       []string            `json:"enabled_groups"`
+	EnabledCapabilities []string            `json:"enabled_capabilities"`
+	VisibleActions      map[string][]string `json:"visible_actions"`
+	HiddenActions       []Hidden            `json:"hidden_actions"`
 }
 
 func (d Deps) report(side string) Visibility {
-	v := Visibility{VisibleActions: map[string][]string{}, HiddenActions: []Hidden{}}
+	v := Visibility{VisibleActions: map[string][]string{}, HiddenActions: []Hidden{}, EnabledCapabilities: []string{}}
 	for _, g := range config.Groups {
 		if d.Config.GroupOn(g) {
 			v.EnabledGroups = append(v.EnabledGroups, g)
+		}
+	}
+	for _, c := range config.Capabilities {
+		if d.Config.Capabilities[c] && (side == "ad") == strings.HasPrefix(c, "ad-") {
+			v.EnabledCapabilities = append(v.EnabledCapabilities, c)
 		}
 	}
 	for _, t := range roster {

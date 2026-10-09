@@ -34,6 +34,8 @@ type fakeDir struct {
 	tree     map[string]map[string][]string // lowercased DN to attributes
 	roots    map[string]map[string][]string // host to rootDSE
 	local    map[string]map[string][]string // "host dn" (dn lowercased) to attributes only that DC holds
+	modifies []string                       // "host dn"
+	denied   map[string]bool                // lowercased DN whose modifies are refused for access
 }
 
 func ntds(dc string) string { return "CN=NTDS Settings,CN=" + strings.ToUpper(dc) + "," + sites }

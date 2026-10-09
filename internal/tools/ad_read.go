@@ -15,6 +15,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/lcleveland/microsoft-directory-mcp/internal/ad"
+	"github.com/lcleveland/microsoft-directory-mcp/internal/config"
 	"github.com/lcleveland/microsoft-directory-mcp/internal/paging"
 )
 
@@ -131,6 +132,8 @@ type adIn struct {
 	Domain string   `json:"domain,omitempty" jsonschema:"search, transitive members: only this domain (DNS or NetBIOS name) instead of every domain of the forest"`
 	Fields []string `json:"fields,omitempty" jsonschema:"LDAP attribute names to return instead of the default set (enabled is derived from userAccountControl); binary attributes come base64"`
 	Cursor string   `json:"cursor,omitempty" jsonschema:"next_cursor from the previous call with the same arguments, unchanged"`
+	writeIn
+	Expires string `json:"expires,omitempty" jsonschema:"writes, set_expiry: when the account expires, an RFC 3339 time (2026-12-31T23:59:59Z), or never"`
 }
 
 // keys are the fields asked for, or def.
@@ -308,11 +311,57 @@ func decodeOffset(cursor, bind string) (int, error) {
 
 type adAPIIn struct {
 	ActionParam
-	Base       string   `json:"base" jsonschema:"search: the DN to search under; it is routed to a domain controller of the domain owning it"`
+	Base       string   `json:"base,omitempty" jsonschema:"search: the DN to search under; it is routed to a domain controller of the domain owning it"`
 	Scope      string   `json:"scope,omitempty" jsonschema:"search: base, one or sub (the default)"`
 	Filter     string   `json:"filter,omitempty" jsonschema:"search: raw LDAP filter, default (objectClass=*); read the ad://guide/ldap-filter resource first"`
 	Attributes []string `json:"attributes,omitempty" jsonschema:"search: LDAP attributes to return, default all; binary attributes come base64 only when named"`
 	Cursor     string   `json:"cursor,omitempty" jsonschema:"next_cursor from the previous call with the same arguments, unchanged"`
+	writeIn
+	DN      string     `json:"dn,omitempty" jsonschema:"writes: the DN of the one object to write"`
+	Changes []adChange `json:"changes,omitempty" jsonschema:"writes, modify: the attribute changes, made in one LDAP modify"`
+}
+
+type adChange struct {
+	Op        string   `json:"op" jsonschema:"add, replace or delete"`
+	Attribute string   `json:"attribute"`
+	Values    []string `json:"values,omitempty"`
+}
+
+// adAPIWriteDoc describes ad_api's writes, when they show.
+const adAPIWriteDoc = "\n\nWrites, one object by dn, with a reason for the audit log. modify: changes to attributes of " +
+	"the ad-objects allowlist (the ad-objects capability); a change a first-class action makes (userAccountControl, " +
+	"unicodePwd, member, gPLink, …) is refused and names that action, and any other attribute is refused. add, " +
+	"delete and rename are always refused and name the action that makes them. Protected targets and objects " +
+	"managed in the tenant are refused, as in every write."
+
+// apiModify is ad_api modify: a raw modify, through the same rails as
+// every AD write.
+func (d Deps) apiModify(ctx context.Context, in adAPIIn) (map[string]any, error) {
+	if in.DN == "" || len(in.Changes) == 0 {
+		return nil, errors.New("modify needs dn and changes")
+	}
+	ops := map[string]uint{"add": ldap.AddAttribute, "replace": ldap.ReplaceAttribute, "delete": ldap.DeleteAttribute}
+	var changes []ldap.Change
+	for _, c := range in.Changes {
+		op, ok := ops[c.Op]
+		if !ok || c.Attribute == "" {
+			return nil, fmt.Errorf("change %+v: want op add, replace or delete, and an attribute", c)
+		}
+		changes = append(changes, ldap.Change{Operation: op, Modification: ldap.PartialAttribute{Type: c.Attribute, Vals: c.Values}})
+	}
+	return d.adWrite(ctx, adWrite{tool: "ad_api", action: "modify", id: in.DN, class: "(objectClass=*)", in: in.writeIn, raw: true,
+		changes: func(*ldap.Entry) ([]ldap.Change, error) { return changes, nil }})
+}
+
+// adCapabilities are the AD side's capabilities.
+func adCapabilities() []string {
+	var out []string
+	for _, c := range config.Capabilities {
+		if strings.HasPrefix(c, "ad-") {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 const adSearchDoc = "Lists search every domain of the forest (domain narrows to one), page 200 at a time with next_cursor " +
@@ -327,6 +376,29 @@ type adExtra struct {
 	run func(Deps, context.Context, adIn) (map[string]any, error)
 }
 
+// accountStateDoc describes the ad-account-state actions that show, or is
+// "" when none does.
+func accountStateDoc(visible []string) string {
+	head := "\n\nWrites (the ad-account-state capability), one account by id, with a reason for the audit log: "
+	var says []string
+	for _, x := range [][2]string{
+		{"disable", "disable and enable change only the ACCOUNTDISABLE bit of userAccountControl"},
+		{"unlock", "unlock clears lockoutTime"},
+		{"must_change", "must_change makes the user change password at next logon (pwdLastSet 0)"},
+		{"set_expiry", "set_expiry sets accountExpires to expires"},
+	} {
+		if slices.Contains(visible, x[0]) {
+			says = append(says, x[1])
+		}
+	}
+	if len(says) == 0 {
+		return ""
+	}
+	return head + strings.Join(says, "; ") + ". Each is sent to the PDC emulator of the account's domain (dc in the reply; " +
+		"fallback when it was unreachable). Protected targets (adminCount, built-in, domain controllers, protected group " +
+		"members) and accounts managed in the tenant are refused. On a synced account, sync says when Entra follows."
+}
+
 func adReadTool(name, group, title, desc string, k adKind, extra ...adExtra) Tool {
 	actions := []Action{{Name: "search"}, {Name: "get"}}
 	for _, x := range extra {
@@ -338,7 +410,8 @@ func adReadTool(name, group, title, desc string, k adKind, extra ...adExtra) Too
 	}
 	return Tool{Name: name, Group: group, Actions: actions,
 		add: func(s *mcp.Server, d Deps, t Tool, visible []string) {
-			addActionTool(s, d, t, &mcp.Tool{Name: name, Title: title, Description: desc + "\n\n" + adSearchDoc, Annotations: readOnly}, visible,
+			addActionTool(s, d, t, &mcp.Tool{Name: name, Title: title, Description: desc + "\n\n" + adSearchDoc + accountStateDoc(visible),
+				Annotations: readOnly}, visible,
 				func(ctx context.Context, _ *mcp.CallToolRequest, in adIn) (*mcp.CallToolResult, map[string]any, error) {
 					for _, x := range extra {
 						if x.Name == in.Action {
@@ -369,7 +442,9 @@ func init() {
 				"(the DC that originated the last lockoutTime write, from replication metadata) and per_dc badPwdCount and "+
 				"badPasswordTime from every DC of the user's domain (they don't replicate; unreachable DCs in _skipped). "+
 				"The machine the bad passwords came from (event 4740) is not read."+counterpartDoc, adUsers,
-			adExtra{Action{Name: "resultant_policy", ADProbe: "pso-read"}, Deps.resultantPolicy}, adExtra{Action{Name: "lockout"}, Deps.lockout}),
+			adExtra{Action{Name: "resultant_policy", ADProbe: "pso-read"}, Deps.resultantPolicy}, adExtra{Action{Name: "lockout"}, Deps.lockout},
+			accountState("ad_user", adUsers, "disable"), accountState("ad_user", adUsers, "enable"), accountState("ad_user", adUsers, "unlock"),
+			accountState("ad_user", adUsers, "must_change"), accountState("ad_user", adUsers, "set_expiry")),
 		Tool{Name: "ad_group", Group: "identity", Actions: []Action{{Name: "search"}, {Name: "get"}, {Name: "members"}},
 			add: func(s *mcp.Server, d Deps, t Tool, visible []string) {
 				addActionTool(s, d, t, &mcp.Tool{Name: t.Name, Title: "Active Directory groups", Annotations: readOnly,
@@ -397,7 +472,9 @@ func init() {
 			"Computer accounts of the forest. search: list computers as briefs (dn, sAMAccountName, dNSHostName, "+
 				"enabled, objectSid, lastLogonTimestamp, whenCreated). get: one computer by id, with operating system "+
 				"and version, managedBy, servicePrincipalName, supported encryption types and the LAPS password expiry "+
-				"(never the password)."+counterpartDoc, adComputers),
+				"(never the password)."+counterpartDoc, adComputers,
+			accountState("ad_computer", adComputers, "disable"), accountState("ad_computer", adComputers, "enable"),
+			accountState("ad_computer", adComputers, "set_expiry")),
 		adOUTool,
 		Tool{Name: "ad_object", Group: "identity", Actions: []Action{{Name: "get"}, {Name: "search_deleted"}},
 			add: func(s *mcp.Server, d Deps, t Tool, visible []string) {
@@ -418,14 +495,27 @@ func init() {
 		adGPOTool,
 		adPolicyTool,
 		adTopologyTool,
-		Tool{Name: "ad_api", Group: "core", Actions: []Action{{Name: "search"}},
+		Tool{Name: "ad_api", Group: "core", Actions: []Action{{Name: "search"}, {Name: "modify", Capabilities: adCapabilities()},
+			{Name: "add", Capabilities: []string{"ad-objects"}}, {Name: "delete", Capabilities: []string{"ad-delete"}},
+			{Name: "rename", Capabilities: []string{"ad-objects"}}},
 			add: func(s *mcp.Server, d Deps, t Tool, visible []string) {
-				addActionTool(s, d, t, &mcp.Tool{Name: t.Name, Title: "Raw Active Directory search", Annotations: readOnly,
-					Description: "Raw LDAP search when no ad_* tool fits. search: base (a DN), scope, filter and " +
-						"attributes, against a domain controller of the domain owning base (configuration and schema go " +
-						"to the forest root domain). Values are decoded as in the other ad_* tools; pages of 200 " +
-						"with next_cursor. Read the ad://guide/ldap-filter resource before writing a filter."},
+				desc := "Raw LDAP search when no ad_* tool fits. search: base (a DN), scope, filter and " +
+					"attributes, against a domain controller of the domain owning base (configuration and schema go " +
+					"to the forest root domain). Values are decoded as in the other ad_* tools; pages of 200 " +
+					"with next_cursor. Read the ad://guide/ldap-filter resource before writing a filter."
+				if len(visible) > 1 {
+					desc += adAPIWriteDoc
+				}
+				addActionTool(s, d, t, &mcp.Tool{Name: t.Name, Title: "Raw Active Directory search", Annotations: readOnly, Description: desc},
 					visible, func(ctx context.Context, _ *mcp.CallToolRequest, in adAPIIn) (*mcp.CallToolResult, map[string]any, error) {
+						switch in.Action {
+						case "modify":
+							out, err := d.apiModify(ctx, in)
+							return nil, out, err
+						case "add", "delete", "rename":
+							_, err := classifyAD(in.Action, "", "", true)
+							return nil, nil, cmp.Or(err, errors.New(in.Action+" is not a write this server makes"))
+						}
 						scope, ok := map[string]int{"": ldap.ScopeWholeSubtree, "sub": ldap.ScopeWholeSubtree,
 							"one": ldap.ScopeSingleLevel, "base": ldap.ScopeBaseObject}[in.Scope]
 						if !ok {
