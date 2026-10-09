@@ -121,16 +121,16 @@ func TestModifyRails(t *testing.T) {
 			return req, nil
 		}
 	}
-	if _, err := c.Modify(ctx, corpDN, "(objectClass=domainDNS)", nil, gpo("gPLink", "gPOptions")); err != nil || len(f.modifies) != 3 {
+	if _, err := c.Modify(ctx, corpDN, "(objectClass=domainDNS)", nil, gpo("gPLink", "gPOptions"), nil); err != nil || len(f.modifies) != 3 {
 		t.Errorf("domain head gPLink: %v %q", err, f.modifies)
 	}
 	for _, vet := range []func(*ldap.Entry) (any, error){describe, gpo("gPOptions", "description"), gpo(),
 		func(e *ldap.Entry) (any, error) { return ldap.NewDelRequest(e.DN, nil), nil }} {
-		if _, err := c.Modify(ctx, corpDN, "(objectClass=*)", nil, vet); !errors.Is(err, ErrProtected) {
+		if _, err := c.Modify(ctx, corpDN, "(objectClass=*)", nil, vet, nil); !errors.Is(err, ErrProtected) {
 			t.Errorf("domain head: want a protected refusal, got %v", err)
 		}
 	}
-	if _, err := c.Modify(ctx, "OU=Domain Controllers,"+corpDN, "(objectClass=*)", nil, gpo("gPLink")); !errors.Is(err, ErrProtected) {
+	if _, err := c.Modify(ctx, "OU=Domain Controllers,"+corpDN, "(objectClass=*)", nil, gpo("gPLink"), nil); !errors.Is(err, ErrProtected) {
 		t.Errorf("Domain Controllers OU gPLink: %v", err)
 	}
 	if len(f.modifies) != 3 {
