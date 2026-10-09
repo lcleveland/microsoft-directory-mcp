@@ -353,7 +353,8 @@ in
         wants = [ "network-online.target" ];
         serviceConfig = {
           Type = "exec";
-          ExecStart = "${lib.getExe cfg.package} ${lib.escapeShellArgs args}";
+          # systemd unescapes C-style escapes even inside quotes, so DOMAIN\name needs its backslash doubled.
+          ExecStart = "${lib.getExe cfg.package} ${lib.escapeShellArgs (map (lib.replaceStrings [ "\\" ] [ "\\\\" ]) args)}";
           Restart = "on-failure";
           RestartSec = 5;
           LoadCredential =

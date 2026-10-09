@@ -163,7 +163,7 @@ in
         check "ad-ca:/etc/ssl/corp-ca.pem" creds
         check "--ad-site Default-First-Site-Name" cmd
         check "--ad-dc dc1.corp.example.com,dc2.corp.example.com:3269" cmd
-        check "--protected-groups 'CORP\tier0,S-1-5-21-1-2-3-1100'" cmd
+        check "--protected-groups 'CORP\\\\tier0,S-1-5-21-1-2-3-1100'" cmd
         check "--entra-tenant 00000000-0000-0000-0000-0000000000aa" cmd
         check "--entra-client-id 00000000-0000-0000-0000-0000000000bb" cmd
         check "--entra-cert-file %d/entra-cert" cmd
