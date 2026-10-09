@@ -33,12 +33,14 @@ type fakeDir struct {
 	srv      map[string][]string
 	tree     map[string]map[string][]string // lowercased DN to attributes
 	roots    map[string]map[string][]string // host to rootDSE
+	local    map[string]map[string][]string // "host dn" (dn lowercased) to attributes only that DC holds
 }
 
 func ntds(dc string) string { return "CN=NTDS Settings,CN=" + strings.ToUpper(dc) + "," + sites }
 
 func newFakeDir() *fakeDir {
 	f := &fakeDir{dead: map[string]bool{}, busy: map[string]bool{}, tree: map[string]map[string][]string{}, roots: map[string]map[string][]string{},
+		local: map[string]map[string][]string{},
 		srv: map[string][]string{
 			"_ldap._tcp.corp.example.com":                    {"dc1.corp.example.com", "dc2.corp.example.com"},
 			"_ldap._tcp.Site1._sites.corp.example.com":       {"dc2.corp.example.com"},
@@ -57,17 +59,21 @@ func newFakeDir() *fakeDir {
 		if dc == "dc1" {
 			opts = "1"
 		}
-		add(ntds(dc), map[string][]string{"options": {opts}})
-		add("CN="+strings.ToUpper(dc)+","+sites, map[string][]string{"dNSHostName": {dc + "." + d}})
 		dn := corpDN
 		if d != "corp.example.com" {
 			dn = childDN
 		}
+		add(ntds(dc), map[string][]string{"objectClass": {"top", "applicationSettings", "nTDSDSA"}, "options": {opts},
+			"msDS-hasMasterNCs": {dn, confDN}, "invocationId": {string(invocation(dc))}})
+		add("CN="+strings.ToUpper(dc)+","+sites, map[string][]string{"objectClass": {"top", "server"}, "dNSHostName": {dc + "." + d}})
 		f.roots[dc+"."+d] = map[string][]string{"defaultNamingContext": {dn}, "rootDomainNamingContext": {corpDN},
 			"configurationNamingContext": {confDN}, "dsServiceName": {ntds(dc)}, "dnsHostName": {dc + "." + d}}
 	}
 	return f
 }
+
+// invocation is a made-up invocationId per DC: 16 bytes of its last digit.
+func invocation(dc string) []byte { return []byte(strings.Repeat(dc[len(dc)-1:], 16)) }
 
 func (f *fakeDir) client(cfg *config.AD) *Client {
 	c, err := New(cfg, 0)

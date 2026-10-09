@@ -357,8 +357,12 @@ func init() {
 				"with password, lockout and expiry times, title, department, manager, memberOf (first 100), "+
 				"servicePrincipalName and userAccountControl flags. lastLogonTimestamp replicates lazily (up to 14 days behind). "+
 				"resultant_policy: the password and lockout policy that applies to the user by id: the PSO msDS-ResultantPSO "+
-				"names (as ad_policy psos gets it), else its domain's default policy.", adUsers,
-			adExtra{Action{Name: "resultant_policy", ADProbe: "pso-read"}, Deps.resultantPolicy}),
+				"names (as ad_policy psos gets it), else its domain's default policy. lockout: why a user by id is locked "+
+				"out, as LDAP shows it: lockoutTime, msDS-User-Account-Control-Computed flags (LOCKOUT), lockoutTime_origin "+
+				"(the DC that originated the last lockoutTime write, from replication metadata) and per_dc badPwdCount and "+
+				"badPasswordTime from every DC of the user's domain (they don't replicate; unreachable DCs in _skipped). "+
+				"The machine the bad passwords came from (event 4740) is not read.", adUsers,
+			adExtra{Action{Name: "resultant_policy", ADProbe: "pso-read"}, Deps.resultantPolicy}, adExtra{Action{Name: "lockout"}, Deps.lockout}),
 		Tool{Name: "ad_group", Group: "identity", Actions: []Action{{Name: "search"}, {Name: "get"}, {Name: "members"}},
 			add: func(s *mcp.Server, d Deps, t Tool, visible []string) {
 				addActionTool(s, d, t, &mcp.Tool{Name: t.Name, Title: "Active Directory groups", Annotations: readOnly,
@@ -406,6 +410,7 @@ func init() {
 			}},
 		adGPOTool,
 		adPolicyTool,
+		adTopologyTool,
 		Tool{Name: "ad_api", Group: "core", Actions: []Action{{Name: "search"}},
 			add: func(s *mcp.Server, d Deps, t Tool, visible []string) {
 				addActionTool(s, d, t, &mcp.Tool{Name: t.Name, Title: "Raw Active Directory search", Annotations: readOnly,

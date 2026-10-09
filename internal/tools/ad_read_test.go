@@ -45,9 +45,10 @@ func TestADReadRosterRegisters(t *testing.T) {
 	ctx := context.Background()
 	got := listed(t, cs)
 	for name, want := range map[string][]string{
-		"ad_user": {"search", "get", "resultant_policy"}, "ad_group": {"search", "get", "members"}, "ad_computer": {"search", "get"},
+		"ad_user": {"search", "get", "resultant_policy", "lockout"}, "ad_group": {"search", "get", "members"}, "ad_computer": {"search", "get"},
 		"ad_ou": {"search", "get", "tree"}, "ad_object": {"get", "search_deleted"}, "ad_gpo": {"search", "get", "links"},
 		"ad_policy": {"domain_default", "psos"}, "ad_api": {"search"},
+		"ad_topology": {"domains", "trusts", "sites", "subnets", "dcs", "fsmo", "replication"},
 	} {
 		if !slices.Equal(got[name], want) {
 			t.Errorf("%s: actions %v, want %v", name, got[name], want)
@@ -63,7 +64,7 @@ func TestADReadRosterRegisters(t *testing.T) {
 func TestPSOProbeHidesActions(t *testing.T) {
 	cs := adSession(t, &ad.Probe{Bound: true, Reads: map[string]string{"pso-read": "cannot read the Password Settings Container"}})
 	got := listed(t, cs)
-	if !slices.Equal(got["ad_policy"], []string{"domain_default"}) || !slices.Equal(got["ad_user"], []string{"search", "get"}) {
+	if !slices.Equal(got["ad_policy"], []string{"domain_default"}) || !slices.Equal(got["ad_user"], []string{"search", "get", "lockout"}) {
 		t.Errorf("ad_policy %v, ad_user %v", got["ad_policy"], got["ad_user"])
 	}
 	want := []string{"ad_user resultant_policy: AD right: pso-read: cannot read the Password Settings Container",

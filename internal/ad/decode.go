@@ -51,6 +51,12 @@ var pwdFlags = []flag{{0x1, "DOMAIN_PASSWORD_COMPLEX"}, {0x2, "DOMAIN_PASSWORD_N
 	{0x4, "DOMAIN_PASSWORD_NO_CLEAR_CHANGE"}, {0x8, "DOMAIN_LOCKOUT_ADMINS"}, {0x10, "DOMAIN_PASSWORD_STORE_CLEARTEXT"},
 	{0x20, "DOMAIN_REFUSE_PASSWORD_CHANGE"}}
 
+// trustFlags are the trustAttributes bits by name, in bit order.
+var trustFlags = []flag{{0x1, "NON_TRANSITIVE"}, {0x2, "UPLEVEL_ONLY"}, {0x4, "QUARANTINED_DOMAIN"},
+	{0x8, "FOREST_TRANSITIVE"}, {0x10, "CROSS_ORGANIZATION"}, {0x20, "WITHIN_FOREST"}, {0x40, "TREAT_AS_EXTERNAL"},
+	{0x80, "USES_RC4_ENCRYPTION"}, {0x100, "USES_AES_KEYS"}, {0x200, "CROSS_ORGANIZATION_NO_TGT_DELEGATION"}, {0x400, "PIM_TRUST"},
+	{0x800, "CROSS_ORGANIZATION_ENABLE_TGT_DELEGATION"}, {0x1000, "DISABLE_AUTH_TARGET_VALIDATION"}}
+
 // uacFlags are the userAccountControl bits by name, in bit order.
 var uacFlags = []flag{
 	{0x1, "SCRIPT"}, {0x2, "ACCOUNTDISABLE"}, {0x8, "HOMEDIR_REQUIRED"}, {0x10, "LOCKOUT"},
@@ -60,6 +66,16 @@ var uacFlags = []flag{
 	{0x20000, "MNS_LOGON_ACCOUNT"}, {0x40000, "SMARTCARD_REQUIRED"}, {0x80000, "TRUSTED_FOR_DELEGATION"},
 	{0x100000, "NOT_DELEGATED"}, {0x200000, "USE_DES_KEY_ONLY"}, {0x400000, "DONT_REQ_PREAUTH"},
 	{0x800000, "PASSWORD_EXPIRED"}, {0x1000000, "TRUSTED_TO_AUTH_FOR_DELEGATION"}, {0x4000000, "PARTIAL_SECRETS_ACCOUNT"},
+}
+
+// Field finds a key of a decoded entry in any case.
+func Field(m map[string]any, name string) (string, any) {
+	for k, v := range m {
+		if strings.EqualFold(k, name) {
+			return k, v
+		}
+	}
+	return "", nil
 }
 
 // Decode renders an entry as dn plus its decoded attributes, adding enabled
@@ -118,8 +134,14 @@ func value(key string, raw []byte) (any, bool) {
 			return nil, true // never
 		}
 		return isoDuration(time.Duration(-n) * 100), true
-	case key == "useraccountcontrol":
+	case key == "useraccountcontrol" || key == "msds-user-account-control-computed":
 		return flagNames(s, uacFlags), true
+	case key == "trustattributes":
+		return flagNames(s, trustFlags), true
+	case key == "trustdirection":
+		return enum(s, "disabled", "inbound", "outbound", "bidirectional"), true
+	case key == "trusttype":
+		return enum(s, "", "downlevel", "uplevel", "mit", "dce"), true
 	case key == "pwdproperties":
 		return flagNames(s, pwdFlags), true
 	case key == "gplink":
@@ -151,6 +173,14 @@ func value(key string, raw []byte) (any, bool) {
 		return nil, false
 	}
 	return s, true
+}
+
+// enum names the integer s by its index in names, else leaves it as is.
+func enum(s string, names ...string) string {
+	if n, err := strconv.Atoi(s); err == nil && n >= 0 && n < len(names) && names[n] != "" {
+		return names[n]
+	}
+	return s
 }
 
 // flagNames lists the names of the bits set in the integer s.

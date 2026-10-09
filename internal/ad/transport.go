@@ -407,16 +407,9 @@ func unreachable(err error) bool { return ldap.IsErrorWithCode(err, ldap.ErrorNe
 // only the domain named by domain. A domain that can't be reached is skipped;
 // any other error fails the call. Results are unsorted.
 func FanOut[T any](ctx context.Context, c *Client, domain string, fn func(Conn, Domain) ([]T, error)) ([]T, []Skipped, error) {
-	ds, err := c.Domains(ctx)
+	ds, err := c.pick(ctx, domain)
 	if err != nil {
 		return nil, nil, err
-	}
-	if domain != "" {
-		d, err := c.Lookup(ctx, domain)
-		if err != nil {
-			return nil, nil, err
-		}
-		ds = []Domain{d}
 	}
 	var (
 		mu      sync.Mutex

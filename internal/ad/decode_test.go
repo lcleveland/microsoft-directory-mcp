@@ -59,6 +59,10 @@ func TestDecode(t *testing.T) {
 				`{"gpo":"cn={A},cn=policies,cn=system,DC=x","link_order":2,"enforced":false,"disabled":false}]}`},
 		"pwdProperties": {map[string][]string{"pwdProperties": {"17"}, "msDS-PSOAppliesTo": {"CN=g"}}, nil,
 			`{"dn":"CN=u,DC=corp,DC=example,DC=com","msDS-PSOAppliesTo":["CN=g"],"pwdProperties":["DOMAIN_PASSWORD_COMPLEX","DOMAIN_PASSWORD_STORE_CLEARTEXT"]}`},
+		"computed uac": {map[string][]string{"msDS-User-Account-Control-Computed": {"8388624"}}, nil,
+			`{"dn":"CN=u,DC=corp,DC=example,DC=com","msDS-User-Account-Control-Computed":["LOCKOUT","PASSWORD_EXPIRED"]}`},
+		"trust": {map[string][]string{"trustDirection": {"3"}, "trustType": {"2"}, "trustAttributes": {"8"}}, nil,
+			`{"dn":"CN=u,DC=corp,DC=example,DC=com","trustAttributes":["FOREST_TRANSITIVE"],"trustDirection":"bidirectional","trustType":"uplevel"}`},
 		"ranged name": {map[string][]string{"member;range=0-1": {"CN=a", "CN=b"}}, nil,
 			`{"dn":"CN=u,DC=corp,DC=example,DC=com","member":["CN=a","CN=b"]}`},
 	} {

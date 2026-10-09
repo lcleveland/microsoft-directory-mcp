@@ -78,7 +78,12 @@ func (c *fakeConn) Search(req *ldap.SearchRequest) (*ldap.SearchResult, error) {
 		res.Controls = append(res.Controls, resp)
 	}
 	for _, dn := range dns {
-		res.Entries = append(res.Entries, ldap.NewEntry(dn, selectAttrs(c.f.tree[dn], req.Attributes)))
+		attrs := c.f.tree[dn]
+		if l := c.f.local[c.host+" "+dn]; l != nil {
+			attrs = maps.Clone(attrs)
+			maps.Copy(attrs, l)
+		}
+		res.Entries = append(res.Entries, ldap.NewEntry(dn, selectAttrs(attrs, req.Attributes)))
 	}
 	return res, nil
 }

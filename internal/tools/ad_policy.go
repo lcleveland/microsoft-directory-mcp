@@ -14,18 +14,8 @@ import (
 	"github.com/lcleveland/microsoft-directory-mcp/internal/ad"
 )
 
-// field finds a key of a decoded entry in any case.
-func field(m map[string]any, name string) (string, any) {
-	for k, v := range m {
-		if strings.EqualFold(k, name) {
-			return k, v
-		}
-	}
-	return "", nil
-}
-
 func links(m map[string]any) []ad.Link {
-	_, v := field(m, "gPLink")
+	_, v := ad.Field(m, "gPLink")
 	l, _ := v.([]ad.Link)
 	return l
 }
@@ -40,7 +30,7 @@ var (
 	adGPOs   = adKind{class: "(objectClass=groupPolicyContainer)",
 		brief: []string{"dn", "displayName", "name", "flags", "versionNumber", "whenChanged"},
 		derive: func(m map[string]any) {
-			if k, v := field(m, "flags"); k != "" {
+			if k, v := ad.Field(m, "flags"); k != "" {
 				if s, ok := map[any]string{"0": "enabled", "1": "user_settings_disabled", "2": "computer_settings_disabled",
 					"3": "all_settings_disabled"}[v]; ok {
 					m[k] = s
@@ -52,7 +42,7 @@ var (
 		brief: []string{"dn", "name", "msDS-PasswordSettingsPrecedence", "msDS-MinimumPasswordLength", "msDS-LockoutThreshold",
 			"msDS-MaximumPasswordAge", "appliesToCount"},
 		derive: func(m map[string]any) {
-			_, v := field(m, "msDS-PSOAppliesTo")
+			_, v := ad.Field(m, "msDS-PSOAppliesTo")
 			l, _ := v.([]any)
 			m["appliesToCount"] = len(l)
 		},
@@ -180,7 +170,7 @@ func (d Deps) gpoLinks(ctx context.Context, in adIn) (map[string]any, error) {
 	}
 	soms := make([]ad.SOM, len(read))
 	for i, m := range read {
-		_, opts := field(m, "gPOptions")
+		_, opts := ad.Field(m, "gPOptions")
 		soms[i] = ad.SOM{DN: chain[i], Links: links(m), Block: opts == "1"}
 	}
 	target := soms[len(soms)-1]

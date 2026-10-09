@@ -24,6 +24,7 @@ let
   adminPass = "VmTest-Admin-Pass-1!";
   bindUser = "svc-mcp";
   bindPass = "VmTest-Bind-Pass-1!";
+  lockedPass = "VmTest-Locked-Pass-1!";
   tenant = "00000000-0000-0000-0000-0000000000aa";
   clientId = "00000000-0000-0000-0000-0000000000bb";
   httpToken = "mcp-http-bearer";
@@ -40,7 +41,7 @@ let
   # one page), vm-team with five users and the nested vm-sub (two more);
   # GPOs a and b linked to OU=vm-ou (b enforced, link order 1), and
   # OU=vm-child under it blocking inheritance. The PSO vm-pso, applied to
-  # vm-team, is created with samba-tool after.
+  # vm-team, and the user vm-locked are created with samba-tool after.
   base = "DC=corp,DC=example,DC=com";
   userDN = n: "CN=vmuser${lib.fixedWidthNumber 3 n},CN=Users,${base}";
   gpoA = "{A1A1A1A1-0000-4000-8000-000000000001}";
@@ -295,7 +296,7 @@ let
 
     _, listed = post({"jsonrpc": "2.0", "id": next(ids), "method": "tools/list"}, session)
     tools = sorted(t["name"] for t in listed["result"]["tools"])
-    assert tools == ["ad_api", "ad_computer", "ad_gpo", "ad_group", "ad_object", "ad_ou", "ad_policy", "ad_status", "ad_user", "entra_status"], tools
+    assert tools == ["ad_api", "ad_computer", "ad_gpo", "ad_group", "ad_object", "ad_ou", "ad_policy", "ad_status", "ad_topology", "ad_user", "entra_status"], tools
 
     ad = call("ad_status", {})
     print("ad_status", json.dumps(ad))
@@ -397,6 +398,29 @@ let
     assert via_team["source"] == "pso" and via_team["policy"] == pso, via_team
     plain = call("ad_user", {"action": "resultant_policy", "id": "vmuser100"})
     assert plain["source"] == "domain_default" and plain["policy"] == default[0], plain
+
+    # Lockout: vm-locked was locked out by bad binds on the one DC before this session.
+    lock = call("ad_user", {"action": "lockout", "id": "vm-locked"})
+    print("ad_user lockout", json.dumps(lock))
+    assert lock["locked_out"] and lock["lockoutTime"] and "LOCKOUT" in lock["msDS-User-Account-Control-Computed"], lock
+    assert lock["lockoutTime_origin"]["dc"] == "${dcHost}" and lock["lockoutTime_origin"]["dsa"], lock
+    assert [p["dc"] for p in lock["per_dc"]] == ["${dcHost}:636"] and int(lock["per_dc"][0]["badPwdCount"]) > 0, lock
+    assert lock["per_dc"][0]["badPasswordTime"] and "_skipped" not in lock, lock
+
+    # Topology: the one DC holds every role; Samba reports no msDS-Repl* attributes.
+    assert call("ad_topology", {"action": "domains"})["results"] == [{"dns": "corp.example.com", "netbios": "CORP", "dn": "${base}"}]
+    dcs = call("ad_topology", {"action": "dcs"})
+    print("ad_topology dcs", json.dumps(dcs))
+    assert dcs["results"] == [{"dNSHostName": "${dcHost}", "domain": "corp.example.com", "site": "Default-First-Site-Name",
+                               "isGC": True, "isPDC": True, "reachable": True}], dcs
+    assert call("ad_topology", {"action": "sites"})["results"] == [{"name": "Default-First-Site-Name", "subnets": 0, "dcs": 1}]
+    fsmo = call("ad_topology", {"action": "fsmo"})["results"]
+    assert [(r["role"], r["dc"]) for r in fsmo] == [(r, "${dcHost}") for r in ("schema", "domain_naming", "pdc", "rid", "infrastructure")], fsmo
+    repl = call("ad_topology", {"action": "replication"})
+    print("ad_topology replication", json.dumps(repl))
+    assert [r["dc"] for r in repl["results"]] == ["${dcHost}:636"] and repl["results"][0]["inbound"] == [], repl
+    assert call("ad_topology", {"action": "trusts"})["results"] == []
+    assert call("ad_topology", {"action": "subnets"})["results"] == []
     print("ok")
   '';
 
@@ -422,6 +446,7 @@ pkgs.testers.runNixOSTest {
 
       environment.systemPackages = [
         pkgs.curl
+        pkgs.openldap
         session
       ];
 
@@ -455,6 +480,9 @@ pkgs.testers.runNixOSTest {
               --objectdn='CN=Password Settings Container,CN=System,${base}' --sddl='(A;CI;RPLCLORC;;;AU)'
             samba-tool domain passwordsettings pso create vm-pso 10 --min-pwd-length=12 --account-lockout-threshold=5 -s ${smbConf}
             samba-tool domain passwordsettings pso apply vm-pso vm-team -s ${smbConf}
+            # vm-locked, locked out by bad binds before the session, under a domain lockout threshold of 3.
+            samba-tool domain passwordsettings set --account-lockout-threshold=3 -s ${smbConf}
+            samba-tool user create vm-locked '${lockedPass}' -s ${smbConf}
           fi
         '';
         serviceConfig = {
@@ -547,6 +575,10 @@ pkgs.testers.runNixOSTest {
   testScript = ''
     machine.wait_for_unit("microsoft-directory-mcp.service", timeout=120)
     machine.wait_for_open_port(${toString mcpPort})
+
+    with subtest("lock out vm-locked with bad binds"):
+        for _ in range(3):
+            machine.fail("LDAPTLS_CACERT=/run/samba-ca.pem ldapwhoami -x -H ldaps://${dcHost} -D vm-locked@corp.example.com -w wrong")
 
     with subtest("a full MCP session: ad_status over LDAPS, entra_status with a verified assertion"):
         print(machine.succeed("mcp-session"))
