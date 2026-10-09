@@ -267,7 +267,7 @@ func (d Deps) entraWrite(ctx context.Context, w entraWrite) (map[string]any, err
 			outcome = "not sent"
 		}
 		d.log().Warn("entra write", append(audit, "outcome", outcome, "error", err.Error())...)
-		return nil, err
+		return nil, audited{err}
 	}
 	d.log().Info("entra write", append(audit, "outcome", "ok")...)
 	return out, nil
@@ -659,13 +659,13 @@ func entraCreate(k entraKind) entraAction {
 			audit = append(audit, "capability", "entra-objects", "properties", slices.Sorted(maps.Keys(body)))
 			if err != nil {
 				d.log().Warn("entra write", append(audit, "outcome", "not sent", "error", err.Error())...)
-				return nil, err
+				return nil, audited{err}
 			}
 			d.log().Info("entra write", append(audit, "outcome", "sending")...)
 			var made map[string]any
 			if err := d.Graph.Do(ctx, http.MethodPost, k.path, body, &made); err != nil {
 				d.log().Warn("entra write", append(audit, "outcome", "failed", "error", err.Error())...)
-				return nil, err
+				return nil, audited{err}
 			}
 			d.log().Info("entra write", append(audit, "outcome", "ok", "id", made["id"])...)
 			out := map[string]any{"id": made["id"], "name": cmp.Or(in.UPN, in.Name), "action": "create", "endpoint": endpoint}

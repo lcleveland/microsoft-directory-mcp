@@ -34,6 +34,12 @@ type writeIn struct {
 
 var errReason = errors.New("reason is required for writes: say why, it is recorded in the audit log")
 
+// audited is a write error the rails have logged already; any other error
+// of a write is logged as refused where every tool call passes (addActionTool).
+type audited struct{ error }
+
+func (e audited) Unwrap() error { return e.error }
+
 // adOp classifies one kind of AD write: the capability that allows it and
 // the first-class action that makes it.
 type adOp struct {
@@ -206,7 +212,7 @@ func (d Deps) adWrite(ctx context.Context, w adWrite) (map[string]any, error) {
 			outcome = "not sent"
 		}
 		d.log().Warn("ad write", append(audit, "outcome", outcome, "error", err.Error())...)
-		return nil, err
+		return nil, audited{err}
 	}
 	d.log().Info("ad write", append(audit, "outcome", "ok")...)
 	out := obj(tgt)
@@ -462,7 +468,7 @@ func (d Deps) create(ctx context.Context, tool, class string, in adIn, groupType
 	for _, k := range keys {
 		if err := allowed(allow, class, k); err != nil {
 			d.log().Warn("ad write", append(audit, "outcome", "not sent", "error", err.Error())...)
-			return nil, err
+			return nil, audited{err}
 		}
 		if v := in.Attributes[k]; v != "" {
 			req.Attribute(k, []string{v})
@@ -479,7 +485,7 @@ func (d Deps) create(ctx context.Context, tool, class string, in adIn, groupType
 	audit = append(audit, "dc", tgt.DC, "fallback", tgt.Fallback)
 	if err != nil {
 		d.log().Warn("ad write", append(audit, "outcome", "failed", "error", err.Error())...)
-		return nil, err
+		return nil, audited{err}
 	}
 	d.log().Info("ad write", append(audit, "outcome", "ok")...)
 	out := obj(tgt)
