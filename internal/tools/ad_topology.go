@@ -52,7 +52,7 @@ func (d Deps) lockout(ctx context.Context, in adIn) (map[string]any, error) {
 }
 
 var adTopologyTool = Tool{Name: "ad_topology", Group: "infra", Actions: []Action{{Name: "domains"}, {Name: "trusts"},
-	{Name: "sites"}, {Name: "subnets"}, {Name: "dcs"}, {Name: "fsmo"}, {Name: "replication"}},
+	{Name: "sites"}, {Name: "subnets"}, {Name: "dcs"}, {Name: "fsmo"}, {Name: "replication", ADProbe: "repl-read"}},
 	add: func(s *mcp.Server, d Deps, t Tool, visible []string) {
 		addActionTool(s, d, t, &mcp.Tool{Name: t.Name, Title: "Active Directory topology", Annotations: readOnly,
 			Description: "The forest's topology and replication, from LDAP alone. domains: each domain (dns, netbios, dn). " +

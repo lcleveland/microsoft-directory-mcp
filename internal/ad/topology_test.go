@@ -217,3 +217,20 @@ func TestSites(t *testing.T) {
 		t.Errorf("got %+v %v", got, err)
 	}
 }
+
+func TestReplReadProbe(t *testing.T) {
+	f := newFakeDir()
+	c := f.client(srvConfig())
+	ctx := context.Background()
+	conn, _, root, err := c.Root(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ReadProbes["repl-read"](conn, root); err == nil {
+		t.Error("no inbound partners in a 4-DC forest: want missing")
+	}
+	f.roots[strings.ToLower(conn.(*fakeConn).host)]["msDS-ReplAllInboundNeighbors"] = []string{"<DS_REPL_NEIGHBOR/>"}
+	if err := ReadProbes["repl-read"](conn, root); err != nil {
+		t.Errorf("partners readable: %v", err)
+	}
+}

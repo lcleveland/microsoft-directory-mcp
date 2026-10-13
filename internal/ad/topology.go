@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -292,6 +293,25 @@ func (c *Client) Replication(ctx context.Context, domain string) ([]Repl, []Skip
 	}
 	slices.SortFunc(out, func(a, b Repl) int { return cmp.Compare(a.DC, b.DC) })
 	return out, skipped, nil
+}
+
+func init() {
+	// repl-read: AD leaves the rootDSE msDS-Repl* attributes out, without an
+	// error, for a bind account lacking the replication-monitoring right. A DC
+	// of a forest with more than one DC always has inbound partners (for the
+	// configuration partition at least), so none there means unreadable.
+	ReadProbes["repl-read"] = func(conn Conn, root *RootDSE) error {
+		res, err := conn.Search(ldap.NewSearchRequest("", ldap.ScopeBaseObject, ldap.NeverDerefAliases, 1, 0, false, "(objectClass=*)",
+			[]string{"msDS-ReplAllInboundNeighbors"}, nil))
+		if err != nil || len(res.Entries) != 1 || len(res.Entries[0].GetEqualFoldAttributeValues("msDS-ReplAllInboundNeighbors")) > 0 {
+			return nil // readable, or undecided: show
+		}
+		if ds, err := dsas(conn, root.ConfigurationNamingContext); err != nil || len(ds) < 2 {
+			return nil // a lone DC has no partners to read
+		}
+		return errors.New("cannot read replication status from the rootDSE (delegate Monitor Active Directory Replication " +
+			"on the domain, configuration and schema partitions)")
+	}
 }
 
 func readRepl(conn Conn, dc string, all []dsa) (Repl, error) {

@@ -348,3 +348,19 @@ func TestWriteFallbackLeavesSite(t *testing.T) {
 		t.Errorf("%+v %v", tgt, err)
 	}
 }
+
+func TestPerDCDialsDCsMissingFromDNS(t *testing.T) {
+	f := newFakeDir()
+	f.srv["_ldap._tcp.child.corp.example.com"] = []string{"dc3.child.corp.example.com"} // dc4 deregistered
+	f.kill("dc4.child.corp.example.com")
+	c := f.client(srvConfig())
+	ctx := context.Background()
+	d, _ := c.Lookup(ctx, "child")
+	got, skipped, err := PerDC(ctx, c, d, func(_ Conn, dc string) (string, error) { return dc, nil })
+	if err != nil || !slices.Equal(got, []string{"dc3.child.corp.example.com:636"}) {
+		t.Errorf("results: %v %v", got, err)
+	}
+	if len(skipped) != 1 || skipped[0].DC != "dc4.child.corp.example.com:636" {
+		t.Errorf("skipped: %+v", skipped)
+	}
+}

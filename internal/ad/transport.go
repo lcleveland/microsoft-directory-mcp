@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -439,11 +440,23 @@ func FanOut[T any](ctx context.Context, c *Client, domain string, fn func(Conn, 
 
 // PerDC opens a short-lived connection to every DC of d (not just --ad-site's),
 // a few at a time within ctx's deadline, runs fn on each and closes them. A DC
-// that can't be reached is skipped; any other error fails the call.
+// that can't be reached is skipped; any other error fails the call. Without
+// --ad-dc, a DC the configuration partition holds but DNS SRV records lack is
+// dialed too, so a deregistered DC shows in skipped instead of vanishing.
 func PerDC[T any](ctx context.Context, c *Client, d Domain, fn func(conn Conn, dc string) (T, error)) ([]T, []Skipped, error) {
 	as, skipped, err := c.dcs(ctx, d, false)
 	if err != nil {
 		return nil, nil, err
+	}
+	if len(c.cfg.DCs) == 0 {
+		_, _, all, _ := c.config(ctx) // config unreadable: SRV records alone
+		for _, s := range all {
+			a := c.addr(s.host, false)
+			if s.host != "" && slices.ContainsFunc(s.ncs, func(nc string) bool { return strings.EqualFold(nc, d.DN) }) &&
+				!slices.ContainsFunc(as, func(x string) bool { return strings.EqualFold(x, a) }) {
+				as = append(as, a)
+			}
+		}
 	}
 	var (
 		mu   sync.Mutex

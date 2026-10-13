@@ -319,7 +319,7 @@ Either way, compare the certificate's fingerprint (`openssl x509 -noout -fingerp
 
 ### Read rights
 
-Domain Users can read almost everything the read tools ask for. Two areas need delegation:
+Domain Users can read almost everything the read tools ask for. Three areas need delegation:
 - **PSOs** (`ad_policy psos`, `ad_user resultant_policy`, and every `ad_policy` write): grant Read on the Password Settings Container and its PSOs:
   ```
   dsacls "CN=Password Settings Container,CN=System,DC=corp,DC=example,DC=com" /I:T /G "CORP\svc-mcp:GR"
@@ -329,8 +329,14 @@ Domain Users can read almost everything the read tools ask for. Two areas need d
   dsacls "CN=Deleted Objects,DC=corp,DC=example,DC=com" /takeownership
   dsacls "CN=Deleted Objects,DC=corp,DC=example,DC=com" /G "CORP\svc-mcp:LCRP"
   ```
+- **Replication status** (`ad_topology replication`): grant Monitor Active Directory Replication on the configuration and schema partitions and on each domain partition. Without it AD returns no replication data and no error, so the startup probe hides the action:
+  ```
+  dsacls "DC=corp,DC=example,DC=com" /G "CORP\svc-mcp:CA;Monitor Active Directory Replication"
+  dsacls "CN=Configuration,DC=corp,DC=example,DC=com" /G "CORP\svc-mcp:CA;Monitor Active Directory Replication"
+  dsacls "CN=Schema,CN=Configuration,DC=corp,DC=example,DC=com" /G "CORP\svc-mcp:CA;Monitor Active Directory Replication"
+  ```
 
-Repeat both for each domain in the forest.
+Repeat the PSO, deleted-object and domain-partition grants for each domain in the forest.
 
 ### Write rights: delegate per attribute
 
