@@ -141,14 +141,22 @@ func TestUserGetSelectsFieldSets(t *testing.T) {
 			if strings.HasSuffix(r.URL.Path, "/subscribedSkus") {
 				return `{"value":[{"skuId":"sku-1","skuPartNumber":"EXAMPLE_SKU"}]}`
 			}
-			return `{"id":"u1","assignedLicenses":[{"skuId":"sku-1"}]}`
+			return `{"id":"00000000-0000-0000-0000-000000000001","assignedLicenses":[{"skuId":"sku-1"}]}`
 		})
 		out, isErr := call(t, cs, "entra_user", map[string]any{"action": "get", "id": "ada@example.com"})
 		if isErr {
 			t.Fatalf("get: %v", out)
 		}
-		r := seen()[0]
-		if r.URL.Path != "/v1.0/users/ada@example.com" || r.URL.Query().Get("$expand") != "manager($select=id,displayName)" {
+		// With signInActivity, the UPN is first resolved to the object id:
+		// Graph refuses that property on a get by UPN.
+		r, path := seen()[0], "/v1.0/users/ada@example.com"
+		if tc.signIn {
+			if r.URL.Path != path || r.URL.Query().Get("$select") != "id" {
+				t.Errorf("P1 %s: resolve %s", tc.lic, r.URL)
+			}
+			r, path = seen()[1], "/v1.0/users/00000000-0000-0000-0000-000000000001"
+		}
+		if r.URL.Path != path || r.URL.Query().Get("$expand") != "manager($select=id,displayName)" {
 			t.Errorf("request %s", r.URL)
 		}
 		sel := strings.Split(r.URL.Query().Get("$select"), ",")

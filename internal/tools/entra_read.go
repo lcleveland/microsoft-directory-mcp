@@ -167,6 +167,21 @@ func (d Deps) userGet(ctx context.Context, in entraIn) (map[string]any, error) {
 	var err error
 	var ae *graph.APIError
 	hidden := len(in.Fields) == 0 && d.why(Tool{Name: "entra_user", Group: "identity"}, signInActivity) != ""
+	// Graph refuses signInActivity on a user addressed by UPN (400 "Get By
+	// Key only supports UserId"), so resolve the UPN to its object id first.
+	if !objectID.MatchString(in.ID) && (len(in.Fields) == 0 && !hidden || slices.Contains(in.Fields, signInActivity.Name)) {
+		var u struct {
+			ID string `json:"id"`
+		}
+		path, err := entraUsers.objectPath(in.ID)
+		if err != nil {
+			return nil, err
+		}
+		if err := d.Graph.Object(ctx, path, graph.Params{Fields: []string{"id"}}, &u); err != nil {
+			return nil, err
+		}
+		in.ID = u.ID
+	}
 	if !hidden {
 		out, err = d.entraObject(ctx, entraUsers, in, entraUsers.get)
 	}

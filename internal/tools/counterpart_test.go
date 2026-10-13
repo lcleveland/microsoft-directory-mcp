@@ -129,7 +129,7 @@ func TestNoCounterpartWithOneSide(t *testing.T) {
 	cs, seen := entraSession(t, nil, func(*http.Request) string {
 		return `{"id":"u1","onPremisesSecurityIdentifier":"` + testSID + `","onPremisesSyncEnabled":true}`
 	})
-	out, isErr := call(t, cs, "entra_user", map[string]any{"action": "get", "id": "ada@example.com"})
+	out, isErr := call(t, cs, "entra_user", map[string]any{"action": "get", "id": "00000000-0000-0000-0000-000000000001"})
 	if _, ok := out["counterpart"]; isErr || ok || len(seen()) != 1 {
 		t.Errorf("%v, %d calls", out, len(seen()))
 	}
