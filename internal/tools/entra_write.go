@@ -331,12 +331,10 @@ func (d Deps) entraProtected(ctx context.Context, k entraKind, tgt map[string]an
 }
 
 // entraAuthority refuses ops on a target synced from the forest when one
-// of them is made in AD instead, naming the AD counterpart and action; a
-// password reset is made in Entra when the operator declares writeback on.
+// of them is made in AD instead, naming the AD counterpart and action.
 // A Graph or AD error fails closed.
 func (d Deps) entraAuthority(ctx context.Context, k entraKind, tgt map[string]any, ops []entraOp) error {
-	writeback := d.Config.Entra != nil && d.Config.Entra.PasswordWriteback == "on"
-	i := slices.IndexFunc(ops, func(o entraOp) bool { return o.synced != "" && !(writeback && o.prop == "passwordProfile") })
+	i := slices.IndexFunc(ops, func(o entraOp) bool { return o.synced != "" })
 	joins := []join{joinUser, joinGroup, joinDevice}
 	j := slices.IndexFunc(joins, func(j join) bool { return j.entra.path == k.path })
 	if i < 0 || j < 0 {
@@ -351,7 +349,7 @@ func (d Deps) entraAuthority(ctx context.Context, k entraKind, tgt map[string]an
 	}
 	err = fmt.Errorf("%v is synced from the forest (%s says so): call %s on %s instead", tgt["id"], c.Source, ops[i].synced, cmp.Or(c.ID, "its AD counterpart"))
 	if ops[i].prop == "passwordProfile" {
-		err = fmt.Errorf("%w; Entra resets a synced user's password only when the operator declares password writeback on (--entra-password-writeback)", err)
+		err = fmt.Errorf("%w; an app-only reset is not written back to AD, even with password writeback on (Microsoft writes back only admin center and delegated resetPassword resets)", err)
 	}
 	return err
 }
@@ -390,10 +388,9 @@ func entraAccountState(action string) entraAction {
 // turned off, with confirm. The reply is the one place it appears.
 // ponytail: the password avoids only a UPN id's name, not the displayName;
 // a synced user's AD complexity check may refuse one in about a thousand.
-// ponytail: with writeback declared on, a synced user's reset is this same
-// app-only PATCH; docs/research/hybrid-sync.md §5 documents writeback for
-// the delegated resetPassword. If Graph refuses it as on-premises mastered,
-// onPremMastered says so; move to resetPassword once delegated auth exists.
+// ponytail: a synced user's reset is refused and routed to AD: writeback
+// covers only the delegated resetPassword (docs/research/password-writeback-signal.md);
+// allow it here once delegated auth exists.
 var entraResetPassword = entraAction{Action{Name: "reset_password", Capabilities: []string{"entra-credentials"},
 	Perms: []string{"User-PasswordProfile.ReadWrite.All", "User.ReadWrite.All", "Directory.ReadWrite.All"}, AlsoPerms: roleRead},
 	func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
@@ -892,8 +889,8 @@ func entraUserDoc(visible []string) string {
 	return "\n\nWrites, one user by id (create: none), with a reason for the audit log: " + strings.Join(says, "; ") +
 		". Protected targets (directory role holders, members and owners of role-assignable groups, owners of applications and service principals) are refused. On a user synced " +
 		"from the forest, disable, enable, edit (but for " + strings.Join(entraCloudProps, ", ") + "), set_manager, remove_manager and delete " +
-		"are refused and name the ad_* action and AD counterpart, and so is reset_password unless the operator declares password " +
-		"writeback on; the rest are allowed."
+		"are refused and name the ad_* action and AD counterpart, and so is " +
+		"reset_password (app-only resets are not written back); the rest are allowed."
 }
 
 // entraCapabilities are the Entra side's capabilities.

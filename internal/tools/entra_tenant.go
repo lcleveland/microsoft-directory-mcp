@@ -230,44 +230,8 @@ func (d Deps) orgInfo(ctx context.Context, in entraIn) (map[string]any, error) {
 	if len(org.Value) > 0 {
 		out = org.Value[0]
 	}
-	out["password_writeback"] = map[string]any{"value": d.Config.Entra.PasswordWriteback, "source": "operator-declared",
-		"audit_hint": d.writebackHint(ctx)}
+	out["password_writeback"] = map[string]any{"value": d.Config.Entra.PasswordWriteback, "source": "operator-declared"}
 	return out, nil
-}
-
-// writebackAudit is what reading the writeback audit hint needs.
-var writebackAudit = Action{Name: "password writeback audit hint", Perms: []string{"AuditLog.Read.All"}}
-
-// writebackHint is the newest Enable/Disable password writeback directory
-// audit event, or unknown: Graph has no writeback flag, and the audit log
-// keeps 7 days on Free, 30 on P1/P2 (docs/research/password-writeback-signal.md).
-func (d Deps) writebackHint(ctx context.Context) map[string]any {
-	unknown := func(why string) map[string]any { return map[string]any{"value": "unknown", "reason": why} }
-	if why := d.why(Tool{Name: "entra_org", Group: "infra"}, writebackAudit); why != "" {
-		return unknown(why)
-	}
-	const on, off = "Enable password writeback for directory", "Disable password writeback for directory"
-	filter := fmt.Sprintf("activityDisplayName eq '%s' or activityDisplayName eq '%s'", on, off)
-	var events struct {
-		Value []struct{ ActivityDisplayName, ActivityDateTime string }
-	}
-	if err := d.Graph.Object(ctx, "/v1.0/auditLogs/directoryAudits", graph.Params{Filter: filter}, &events); err != nil {
-		return unknown(err.Error())
-	}
-	var newest map[string]any
-	for _, e := range events.Value {
-		if newest == nil || e.ActivityDateTime > newest["activityDateTime"].(string) {
-			value := "disabled"
-			if e.ActivityDisplayName == on {
-				value = "enabled"
-			}
-			newest = map[string]any{"value": value, "activityDateTime": e.ActivityDateTime, "source": "directory audit: " + e.ActivityDisplayName}
-		}
-	}
-	if newest == nil {
-		return unknown("no Enable/Disable password writeback for directory event in the audit log's retention (7 days on Free, 30 on P1/P2)")
-	}
-	return newest
 }
 
 var (
@@ -316,9 +280,7 @@ func init() {
 		entraTool("entra_org", "infra", "Entra ID tenant",
 			"info: the tenant (id, displayName, tenantType, verifiedDomains, countryLetterCode, createdDateTime), its "+
 				"directory sync (onPremisesSyncEnabled, onPremisesLastSyncDateTime) and password_writeback. Its value is "+
-				"operator-declared (--entra-password-writeback): Graph has no reliable writeback flag. audit_hint is the "+
-				"newest Enable/Disable password writeback directory audit event (needs AuditLog.Read.All), or unknown "+
-				"when there is none in the log's retention (7 days on Free, 30 on P1/P2).",
+				"operator-declared (--entra-password-writeback): Graph has no reliable writeback flag.",
 			nil,
 			entraAction{Action{Name: "info", Perms: orgRead}, Deps.orgInfo},
 		),

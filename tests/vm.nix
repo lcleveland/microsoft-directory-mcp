@@ -727,8 +727,7 @@ let
     print("entra_org info", json.dumps(org))
     assert org["displayName"] == "Example Org" and org["onPremisesSyncEnabled"] is True, org
     assert org["password_writeback"]["value"] == "off" and org["password_writeback"]["source"] == "operator-declared", org
-    # The audit hint: the seeded Enable password writeback event.
-    assert org["password_writeback"]["audit_hint"]["value"] == "enabled", org
+    assert "audit_hint" not in org["password_writeback"], org
 
     # The directory audit log, cut to the brief; a filter on the activity.
     audit = call("entra_audit", {"action": "search"})
@@ -891,10 +890,10 @@ let
     assert w["id"] == "00000000-0000-0000-0000-000000000103" and w["endpoint"] == "PATCH /v1.0/users/entra-user3@example.com", w
     assert call("entra_user", {"action": "get", "id": w["id"]})["accountEnabled"] is False
 
-    # entra-credentials, with writeback declared off: the synced user's reset is refused and routed to AD; a cloud user's goes through.
+    # entra-credentials: the synced user's reset is refused and routed to AD; a cloud user's goes through.
     why = refused("entra_user", {"action": "reset_password", "id": synced["id"], "confirm": "synced-user@example.com", "reason": "vm-test entra reset synced"})
     print("entra_user reset_password synced", why)
-    assert "call ad_user reset_password on " + by_upn["dn"] in why and "--entra-password-writeback" in why, why
+    assert "call ad_user reset_password on " + by_upn["dn"] in why and "not written back" in why, why
     w = call("entra_user", {"action": "reset_password", "id": "entra-user2@example.com", "confirm": "entra-user2@example.com", "reason": "vm-test entra reset"})
     assert w["endpoint"] == "PATCH /v1.0/users/entra-user2@example.com" and w["must_change"] is True and len(w["password"]) >= 20, w
     with open("/tmp/vm-entra-password", "w") as fh:

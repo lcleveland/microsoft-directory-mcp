@@ -104,13 +104,13 @@ With both sides on, the server joins a synced object to its **counterpart** by S
 Every write checks the source of authority before anything is sent:
 - **Entra refuses** synced attributes, enable and disable, delete, and membership of synced groups on synced objects. The error points to the matching `ad_*` action.
 - **Entra allows** licences, sessions, authentication methods, risk, and membership of cloud groups on synced users.
-- **An Entra password reset** on a synced user needs password writeback declared on (`--entra-password-writeback on`).
+- **An Entra password reset** on a synced user is refused and pointed to `ad_user reset_password`, even with writeback on. Microsoft writes back only resets made in the admin center or through the delegated `resetPassword` API, and this server is app-only ([research](docs/research/password-writeback-signal.md#5-live-findings)).
 - **AD refuses** writes to an object whose counterpart is cloud-managed.
 - **Moving an AD object** that has a counterpart returns a warning, not a refusal. The server can't read Connect Sync's OU filter, so it can't tell whether the move takes the object out of sync scope.
 
 **No sync trigger.** Connect Sync has no Graph API to start a cycle, so an AD write reaches Entra on the next scheduled cycle: every 30 minutes by default for Connect Sync, and about every 2 minutes for Cloud Sync. `entra_status` shows whether sync is on and when it last ran.
 
-**Password writeback is operator-declared.** App-only Graph has no reliable way to detect it ([research](docs/research/password-writeback-signal.md)). Set `--entra-password-writeback` to `on`, `off` or `unknown` (the default) to match the Entra admin center: **Password reset → On-premises integration**. `entra_status` reports the value as operator-declared.
+**Password writeback is operator-declared.** App-only Graph has no reliable way to detect it ([research](docs/research/password-writeback-signal.md)). Set `--entra-password-writeback` to `on`, `off` or `unknown` (the default) to match the Entra admin center: **Password reset → On-premises integration**. `entra_status` and `entra_org info` report the value as operator-declared. It is information only: it gates no action.
 
 ## Probe
 

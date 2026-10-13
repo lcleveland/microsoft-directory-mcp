@@ -38,12 +38,22 @@ Research for #18 (part of map #1, follow-up to [hybrid-sync.md §5](hybrid-sync.
 
 ## 4. Recommendation for the server
 
+_Superseded in part by §5: the server keeps the operator-declared value (point 3) and doesn't read the audit log (point 2)._
+
 1. Don't read `features.passwordWritebackEnabled` at all, or read it only to show it is unused.
 2. Expose writeback as a tri-state **`enabled` / `disabled` / `unknown`**, derived from the newest `Enable/Disable password writeback for directory` audit event:
    `GET /v1.0/auditLogs/directoryAudits?$filter=loggedByService eq 'Self-service Password Management' and (activityDisplayName eq 'Enable password writeback for directory' or activityDisplayName eq 'Disable password writeback for directory')&$orderby=activityDateTime desc&$top=1`
    With no hit, return `unknown`. Needs `AuditLog.Read.All`, which is already in the read-only permission set ([entra-permissions-and-licensing.md](entra-permissions-and-licensing.md)).
 3. Let an operator override the value in config (e.g. `passwordWriteback: true`) for tenants where the audit window has passed. That is the only way to reach a known state long-term.
 4. On a real `resetPassword` of a synced user, report a writeback failure as such. Don't silently fall back to an AD-side reset, because a fallback changes which policy path the password takes.
+
+## 5. Live findings
+
+From a hybrid tenant with Connect Sync and writeback on, checked on 2026-10-13 for #65:
+
+- **No toggle events in retention.** Over 30 days, `Self-service Password Management` logged only `Self-service password reset flow activity progress` and `Reset password (self-service)`. There was no `Enable/Disable password writeback for directory` event, so a hint built on those (§4.2) says `unknown` in a tenant where writeback has been on for a long time. The server doesn't read the audit log for writeback, per #11.
+- **Writeback leaves a trace on each reset.** A `Reset password (self-service)` event for a synced user carries `additionalDetails` `OnPremisesAgent: AADConnect`. When AD refuses the password, the event fails with `ErrorEventId` 33008 and an `ErrorMessage` from the Synchronization Engine (`hr=80230619`, a password-policy restriction). That proves writeback worked at that moment, but only when a user happened to reset inside retention.
+- **App-only resets aren't written back.** Microsoft lists the admin center and the delegated [`authenticationMethod resetPassword`](https://learn.microsoft.com/en-us/graph/api/authenticationmethod-resetpassword) API as the only admin reset paths that write back ([supported writeback operations](https://learn.microsoft.com/en-us/entra/identity/authentication/concept-sspr-writeback#supported-writeback-operations), updated 2026-09-08). An app-only `PATCH passwordProfile` isn't one of them. So `entra_user reset_password` refuses a synced user whatever `--entra-password-writeback` says, and names `ad_user reset_password`. The PATCH wasn't sent to a synced user live: the documentation settles it, and a stray success would change a real password without AD's policy check.
 
 ## Open questions surfaced
 

@@ -6,8 +6,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/lcleveland/microsoft-directory-mcp/internal/graph"
 )
 
 // expiring_credentials keeps the credentials that end inside the window,
@@ -40,38 +38,6 @@ func TestExpiringCredentialsWindow(t *testing.T) {
 	}
 	if _, isErr := call(t, cs, "entra_app", map[string]any{"action": "expiring_credentials", "days": -1}); !isErr {
 		t.Error("negative window accepted")
-	}
-}
-
-// The writeback hint is the newest audit event, whatever order Graph sends
-// them in; without AuditLog.Read.All it is unknown and the log is not read.
-func TestWritebackHint(t *testing.T) {
-	reply := func(r *http.Request) string {
-		if strings.HasSuffix(r.URL.Path, "/directoryAudits") {
-			return `{"value":[{"activityDisplayName":"Disable password writeback for directory","activityDateTime":"2026-01-02T00:00:00Z"},` +
-				`{"activityDisplayName":"Enable password writeback for directory","activityDateTime":"2026-01-03T00:00:00Z"},` +
-				`{"activityDisplayName":"Disable password writeback for directory","activityDateTime":"2026-01-01T00:00:00Z"}]}`
-		}
-		return `{"value":[{"id":"t","displayName":"Example"}]}`
-	}
-	for _, tc := range []struct {
-		roles []string
-		want  string
-		reads int
-	}{
-		{[]string{"Organization.Read.All", "AuditLog.Read.All"}, "enabled 2026-01-03T00:00:00Z", 2},
-		{[]string{"Organization.Read.All"}, "unknown <nil>", 1},
-	} {
-		cs, seen := entraSession(t, &graph.Probe{Roles: tc.roles}, reply)
-		out, isErr := call(t, cs, "entra_org", map[string]any{"action": "info"})
-		wb, _ := out["password_writeback"].(map[string]any)
-		hint, _ := wb["audit_hint"].(map[string]any)
-		if got := fmt.Sprint(hint["value"], " ", hint["activityDateTime"]); isErr || got != tc.want || wb["source"] != "operator-declared" {
-			t.Errorf("roles %v: %v", tc.roles, out)
-		}
-		if n := len(seen()); n != tc.reads {
-			t.Errorf("roles %v: %d Graph calls, want %d", tc.roles, n, tc.reads)
-		}
 	}
 }
 

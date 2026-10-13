@@ -21,7 +21,7 @@ As a result the service principal only ever needs User Administrator, never Priv
 **Source of authority is checked per operation, before sending:**
 - Refused in Entra and pointed to the matching `ad_*` action: synced attributes, enable/disable, delete, and membership of synced groups.
 - Allowed on synced users: licences, sessions, auth methods, risk, and cloud-group membership.
-- Entra password reset on a synced user needs writeback to be declared on.
+- Entra password reset on a synced user is refused and pointed to `ad_user reset_password`: Microsoft writes back only admin center and delegated `resetPassword` resets, not app-only ones (#65).
 - AD writes to an object whose counterpart is cloud-managed are refused.
 
 **Raw tools never bypass the rails.** In `ad_api` and `entra_api`, a write that a first-class action covers is refused and pointed to that action. Raw writes are left with `ad-objects` allowlisted attribute edits on a user, group or computer (an `ad_api` modify; OUs, contacts and other classes are refused), and `entra-objects` allowlisted property edits on a user or group (an `entra_api` PATCH). Every other raw write is refused.

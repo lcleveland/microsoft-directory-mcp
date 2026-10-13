@@ -347,7 +347,7 @@ func entraCall(d Deps, a entraAction, in entraIn) (map[string]any, error) {
 
 // A reset sets the generated password, returned once and never logged,
 // must-change by default; confirm names the UPN. On a synced user it is
-// refused, and routed to AD, unless writeback is declared on.
+// refused and routed to AD, whatever writeback is declared.
 func TestEntraResetPassword(t *testing.T) {
 	d, buf, _ := entraWriteDeps(t, "", "entra-credentials")
 	d, bodies := entraBodies(t, d, "")
@@ -373,9 +373,8 @@ func TestEntraResetPassword(t *testing.T) {
 		name, id, confirm, writeback, says string
 	}{
 		{"confirm mismatch", u1, "other@example.com", "", `confirm must be the target's userPrincipalName: ` + u1 + ` is "user@example.com"`},
-		{"synced", u2, "u2@example.com", "unknown", "call ad_user reset_password on its AD counterpart instead; Entra resets a synced user's password only when the operator declares password writeback on"},
-		{"synced, writeback off", u2, "u2@example.com", "off", "call ad_user reset_password"},
-		{"synced, writeback on", u2, "u2@example.com", "on", ""},
+		{"synced", u2, "u2@example.com", "unknown", "call ad_user reset_password on its AD counterpart instead; an app-only reset is not written back"},
+		{"synced, writeback on", u2, "u2@example.com", "on", "call ad_user reset_password"},
 	} {
 		d, _, writes := entraWriteDeps(t, "", "entra-credentials")
 		d.Config.Entra = &config.Entra{PasswordWriteback: tc.writeback}
