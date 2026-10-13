@@ -37,6 +37,7 @@ func graphStub(t *testing.T, h http.HandlerFunc) (*Client, *[]time.Duration) {
 func TestAdvancedQueryRules(t *testing.T) {
 	for _, tc := range []struct {
 		p               Params
+		path            string // default /v1.0/users
 		eventual        bool
 		count           bool
 		search, select_ string
@@ -53,12 +54,21 @@ func TestAdvancedQueryRules(t *testing.T) {
 		// Operators inside a string literal don't count.
 		{p: Params{Filter: "displayName eq 'not ne endsWith(x) it''s'"}},
 		{p: Params{Filter: "notes eq 'x'"}},
+		// Nested directory collections take them too; logs refuse $count.
+		{p: Params{Filter: "accountEnabled ne true"}, path: "/v1.0/groups/g/members", eventual: true, count: true},
+		{p: Params{Filter: "result ne 'success'"}, path: "/v1.0/auditLogs/directoryAudits"},
+		{p: Params{Filter: "activityDateTime ge 2026-01-01T00:00:00Z", Sort: "activityDateTime desc"}, path: "/v1.0/auditLogs/directoryAudits"},
+		{p: Params{Filter: "status/errorCode ne 0"}, path: "/beta/auditLogs/signIns"},
+		{p: Params{Filter: "riskLevel ne 'none'"}, path: "/v1.0/identityProtection/riskyUsers"},
 		// $search needs only the header.
 		{p: Params{Query: `ada "x"`}, eventual: true, search: `"displayName:ada \"x\"" OR "mail:ada \"x\""`},
 	} {
-		q, ev := tc.p.encode()
+		if tc.path == "" {
+			tc.path = "/v1.0/users"
+		}
+		q, ev := tc.p.encode("https://graph.example.com" + tc.path)
 		if ev != tc.eventual || (q.Get("$count") == "true") != tc.count || q.Get("$search") != tc.search || q.Get("$select") != tc.select_ {
-			t.Errorf("%+v: eventual %v query %v", tc.p, ev, q)
+			t.Errorf("%s %+v: eventual %v query %v", tc.path, tc.p, ev, q)
 		}
 		if q.Get("$filter") != tc.p.Filter || q.Get("$orderby") != tc.p.Sort {
 			t.Errorf("%+v: not passed through: %v", tc.p, q)

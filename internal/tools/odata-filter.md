@@ -41,7 +41,8 @@ is **eventually consistent**: an object created or changed in the last minutes m
 be missing or stale, so read it back with a get by id.
 
 Advanced queries work only on directory objects: users, groups, devices,
-applications, service principals, contacts and administrative units. Audit logs,
+applications, service principals, contacts and administrative units, and the
+server turns them on only there. Audit logs,
 sign-ins, Intune and Conditional Access have their own, narrower `$filter`
 support: keep their filters to `eq`, `ge`/`le` on times, `startsWith` and `and`.
 

@@ -33,12 +33,16 @@ var (
 	literal = regexp.MustCompile(`'(?:[^']|'')*'`)
 	// Filter operators that need advanced query parameters.
 	advancedOp = regexp.MustCompile(`(?i)\b(?:ne|not)\b|\bendswith\s*\(|/\$count\b`)
+	// Collections of directory objects: the only ones with advanced queries.
+	// Others, such as the audit and sign-in logs, refuse $count with a 400.
+	directoryPath = regexp.MustCompile(`/(?:v1\.0|beta)/(?:users|groups|devices|applications|servicePrincipals|contacts|administrativeUnits|directoryObjects|directoryRoles|directory/deletedItems)(?:[/?]|$)`)
 )
 
-// encode returns the query parameters and whether ConsistencyLevel:
-// eventual must go with them. ne, not, endsWith, /$count, and $filter with
-// $orderby need the header and $count=true; $search needs only the header.
-func (p Params) encode() (url.Values, bool) {
+// encode returns the query parameters for path and whether ConsistencyLevel:
+// eventual must go with them. On a directory-object path, ne, not, endsWith,
+// /$count, and $filter with $orderby need the header and $count=true;
+// $search needs only the header.
+func (p Params) encode(path string) (url.Values, bool) {
 	q := url.Values{}
 	for k, v := range map[string]string{"$filter": p.Filter, "$orderby": p.Sort, "$select": strings.Join(p.Fields, ","), "$expand": p.Expand} {
 		if v != "" {
@@ -49,7 +53,8 @@ func (p Params) encode() (url.Values, bool) {
 		s := strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(p.Query)
 		q.Set("$search", `"displayName:`+s+`" OR "mail:`+s+`"`)
 	}
-	advanced := advancedOp.MatchString(literal.ReplaceAllString(p.Filter, "''")) || p.Filter != "" && p.Sort != ""
+	advanced := directoryPath.MatchString(path) &&
+		(advancedOp.MatchString(literal.ReplaceAllString(p.Filter, "''")) || p.Filter != "" && p.Sort != "")
 	if advanced {
 		q.Set("$count", "true")
 	}
@@ -59,7 +64,7 @@ func (p Params) encode() (url.Values, bool) {
 // url appends p's query to path, and says whether ConsistencyLevel:
 // eventual goes with it: when p needs it, or path counts.
 func (p Params) url(path string) (string, bool) {
-	q, eventual := p.encode()
+	q, eventual := p.encode(path)
 	if len(q) > 0 {
 		sep := "?"
 		if strings.Contains(path, "?") {
