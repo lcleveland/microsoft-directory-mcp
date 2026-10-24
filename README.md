@@ -407,7 +407,7 @@ Each action needs any one of the permissions it accepts. This list covers every 
 | `entra-account-state` | `User.EnableDisableAccount.All`, `User.RevokeSessions.All` |
 | `entra-credentials` | `User-PasswordProfile.ReadWrite.All` (reset_password), `UserAuthMethod-TAP.ReadWrite.All` (issue_tap), `UserAuthenticationMethod.ReadWrite.All` (delete_auth_method) |
 | `entra-group-membership` | `GroupMember.ReadWrite.All` |
-| `entra-objects` | `User.ReadWrite.All`; `Group.Create` to create groups; `Group.ReadWrite.All` to edit them |
+| `entra-objects` | `User.Create` and `Group.Create` to create; `User.ReadWrite.All` and `Group.ReadWrite.All` to edit and set managers |
 | `entra-delete` | `User.DeleteRestore.All`, `Group.ReadWrite.All`, `Device.ReadWrite.All` |
 | `entra-licenses` | `LicenseAssignment.ReadWrite.All` |
 | `entra-devices` | `Device.ReadWrite.All` |

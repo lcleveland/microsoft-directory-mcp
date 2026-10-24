@@ -101,7 +101,7 @@ Connect Sync's per-object run errors (export errors, sourceAnchor change errors,
 ## Open questions surfaced
 
 - Does Cloud Sync AD→Entra populate `onPremisesDistinguishedName` / `onPremisesSamAccountName` / `onPremisesDomainName`, which the Graph docs say are "Entra Connect only"?
-- Is `onPremisesSyncBehavior` on Graph v1.0 or still beta? The how-tos use v1.0; the reference page is beta-only.
+- Is `onPremisesSyncBehavior` on Graph v1.0 or still beta? Checked 2026-10-24: still beta-only (reference page and Graph changelog list no v1.0 release), so the server's v1.0 read falls back to `onPremisesSyncEnabled` until it ships.
 - Should the server expose a Connect Sync trigger by remoting `Start-ADSyncSyncCycle` to the sync server (a third connection target), or accept "wait for the cycle"?
 - How should the server detect whether password writeback is actually enabled, given that the tenant feature flag is documented as unused?
 - Should SOA conversion (`isCloudManaged`) be a capability the server offers? It moves an object's source of authority and so changes which side owns writes.

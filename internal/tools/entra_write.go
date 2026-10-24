@@ -612,7 +612,7 @@ func entraCreate(k entraKind) entraAction {
 	tool, col := "entra_group", "groups"
 	perms := []string{"Group.Create", "Group.ReadWrite.All", "Directory.ReadWrite.All"}
 	if k.path == entraUsers.path {
-		tool, col, perms = "entra_user", "users", []string{"User.ReadWrite.All", "Directory.ReadWrite.All"}
+		tool, col, perms = "entra_user", "users", []string{"User.Create", "User.ReadWrite.All", "Directory.ReadWrite.All"}
 	}
 	return entraAction{Action{Name: "create", Perms: perms, Capabilities: []string{"entra-objects"}},
 		func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
