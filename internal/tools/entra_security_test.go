@@ -136,3 +136,19 @@ func TestConditionalAccessListBriefGetFull(t *testing.T) {
 		t.Errorf("get %s", rs[1].URL)
 	}
 }
+
+// Without id, registration lists every user's details as briefs, without
+// $top or $select (the report documents only $filter).
+func TestRegistrationReport(t *testing.T) {
+	cs, seen := entraSession(t, nil, func(r *http.Request) string {
+		return `{"value":[{"id":"u1","userPrincipalName":"ada@example.com","isMfaRegistered":false,"methodsRegistered":[],"systemPreferredAuthenticationMethods":[]}]}`
+	})
+	out, isErr := call(t, cs, "entra_user", map[string]any{"action": "registration", "filter": "isMfaRegistered eq false"})
+	if got := fmt.Sprint(out["results"]); isErr || got != "[map[id:u1 isMfaRegistered:false methodsRegistered:[] userPrincipalName:ada@example.com]]" {
+		t.Errorf("%v", out)
+	}
+	q := seen()[0].URL.Query()
+	if q.Has("$top") || q.Has("$select") || q.Get("$filter") != "isMfaRegistered eq false" {
+		t.Errorf("query %v", q)
+	}
+}

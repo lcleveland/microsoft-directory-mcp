@@ -17,7 +17,7 @@ The AD side speaks LDAP only (LDAPS, or StartTLS), plus DNS for discovery. The E
 | security | | `entra_audit`, `entra_signin`, `entra_risk`, `entra_role` |
 | policy | `ad_gpo`, `ad_policy` (password policy and PSOs) | `entra_policy` (read only) |
 | devices | `ad_computer` | `entra_device` (Entra and Intune devices), `entra_license` |
-| infra | `ad_topology` | `entra_org` |
+| infra | `ad_topology` | `entra_org`, `entra_health` (Microsoft 365 service health) |
 
 Each tool takes an `action`, and its description lists the actions and their parameters. A write action exists only while its capability is on. The tags in brackets are licences (see [Licences](#licences)).
 
@@ -46,6 +46,7 @@ Each tool takes an `action`, and its description lists the actions and their par
 | `entra_role` | definitions, assignments, eligibility [P2] | |
 | `entra_license` | skus | |
 | `entra_org` | info | |
+| `entra_health` | services, issues, messages | |
 
 Searches and lists:
 - take a `filter`: an LDAP filter on the AD side and OData on the Entra side. The guides are served as MCP resources at `ad://guide/ldap-filter` and `entra://guide/odata-filter`;
@@ -390,13 +391,14 @@ Each action needs any one of the permissions it accepts. This list covers every 
 | `Device.Read.All` | `entra_device` search, get, owners; `entra_user devices` |
 | `DeviceManagementManagedDevices.Read.All` | `entra_device` managed_search, managed_get [Intune] |
 | `UserAuthenticationMethod.Read.All` | `entra_user auth_methods` |
-| `AuditLog.Read.All` | `entra_audit`, `entra_signin` [P1], `entra_user registration` [P1], and `signInActivity` on user gets [P1] |
+| `AuditLog.Read.All` | `entra_audit`, `entra_signin` [P1], `entra_user registration` (one user, or the tenant-wide report) [P1], and `signInActivity` on user gets [P1] |
 | `IdentityRiskyUser.Read.All`, `IdentityRiskEvent.Read.All` | `entra_risk` reads [P2] |
 | `Policy.Read.All`, `Policy.Read.AuthenticationMethod` | `entra_policy` |
 | `Application.Read.All` | `entra_app` |
 | `RoleManagement.Read.Directory` | `entra_role` definitions, assignments, eligibility [P2]; the protected-target check before every user write |
 | `LicenseAssignment.Read.All` | `entra_license skus`; the probe's licence check |
 | `Organization.Read.All` | `entra_org`, `entra_status` |
+| `ServiceHealth.Read.All`, `ServiceMessage.Read.All` | `entra_health` services and issues; messages |
 
 `entra_api get` can reach any v1.0 or beta path, but only within what these permissions allow. Beta replies carry `_unstable`: Microsoft doesn't support beta in production and changes it without notice. The server does not filter secret-bearing reads: grant a permission such as `DeviceLocalCredential.Read.All` (LAPS passwords) or `BitlockerKey.Read.All` (BitLocker recovery keys) and `entra_api get` returns those secrets.
 

@@ -22,9 +22,10 @@ type entraKind struct {
 	path       string
 	brief, get []string
 	expand     string
-	upnOK      bool   // get takes a UPN as well as an object id
-	searchable bool   // lists take query ($search on displayName and mail)
-	typ        string // @odata.type of its objects in mixed relations
+	upnOK      bool           // get takes a UPN as well as an object id
+	searchable bool           // lists take query ($search on displayName and mail)
+	typ        string         // @odata.type of its objects in mixed relations
+	id         *regexp.Regexp // ids that aren't GUIDs, such as MC123456
 }
 
 func (k entraKind) curated(more ...string) entraKind {
@@ -55,7 +56,7 @@ var objectID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}
 // objectPath is k's path to the object id names (a UPN too for users).
 func (k entraKind) objectPath(id string) (string, error) {
 	switch {
-	case objectID.MatchString(id):
+	case objectID.MatchString(id), k.id != nil && k.id.MatchString(id):
 	case k.upnOK && strings.Contains(id, "@") && !strings.ContainsAny(id, "/?#"):
 	case k.upnOK:
 		return "", fmt.Errorf("id %q: want an object id (GUID) or a UPN", id)
@@ -85,7 +86,7 @@ func entraShape(m map[string]any) map[string]any {
 
 type entraIn struct {
 	ActionParam
-	ID     string   `json:"id,omitempty" jsonschema:"every action but search: the object id (a GUID); entra_user also takes a UPN"`
+	ID     string   `json:"id,omitempty" jsonschema:"every action but search: the object id (a GUID unless the tool says otherwise); entra_user also takes a UPN; optional where the tool says so"`
 	Filter string   `json:"filter,omitempty" jsonschema:"lists: OData $filter, passed through; read the entra://guide/odata-filter resource first"`
 	Query  string   `json:"query,omitempty" jsonschema:"search: quick lookup by displayName or mail (word prefix)"`
 	Sort   string   `json:"sort,omitempty" jsonschema:"lists: OData $orderby, e.g. displayName desc"`
@@ -262,8 +263,11 @@ func (d Deps) userDevices(ctx context.Context, in entraIn) (map[string]any, erro
 }
 
 // registration reads a user's userRegistrationDetails, which is keyed by
-// object id only.
+// object id only; without id, every user's.
 func (d Deps) registration(ctx context.Context, in entraIn) (map[string]any, error) {
+	if in.ID == "" {
+		return entraRegistrations.search(d, ctx, in)
+	}
 	id := in.ID
 	if !objectID.MatchString(id) {
 		u, err := d.entraObject(ctx, entraUsers, entraIn{ID: id, Fields: []string{"id"}}, nil)
@@ -341,6 +345,16 @@ func entraGet(k entraKind) func(Deps, context.Context, entraIn) (map[string]any,
 	}
 }
 
+// listOrGet lists k, or reads the object in.ID of k in full.
+func listOrGet(k entraKind) func(Deps, context.Context, entraIn) (map[string]any, error) {
+	return func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
+		if in.ID != "" {
+			return entraGet(k)(d, ctx, in)
+		}
+		return entraSearch(k)(d, ctx, in)
+	}
+}
+
 func related(k entraKind, rel string, def []string) func(Deps, context.Context, entraIn) (map[string]any, error) {
 	return func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
 		return d.entraList(ctx, k, rel, in, def)
@@ -403,7 +417,9 @@ func init() {
 				"is a direct member of. devices: the devices the user owns or registered, each with relation. licenses: "+
 				"assignedLicenses and licenseAssignmentStates (direct or group-inherited, errors), with skuPartNumber. "+
 				"auth_methods: the user's registered authentication methods. registration: the user's MFA and SSPR "+
-				"registration details (P1)."+counterpartDoc, entraUserDoc,
+				"registration details (P1); without id, every user's as briefs (id, userPrincipalName, userDisplayName, "+
+				"userType, isAdmin, isMfaRegistered, isMfaCapable, isSsprRegistered, isPasswordlessCapable, methodsRegistered, "+
+				"lastUpdatedDateTime), filtered on those, e.g. isMfaRegistered eq false."+counterpartDoc, entraUserDoc,
 			entraAction{Action{Name: "search", Perms: userRead}, entraSearch(entraUsers)},
 			entraAction{Action{Name: "get", Perms: userRead}, Deps.userGet},
 			entraAction{Action{Name: "member_of", Perms: groupRead}, related(entraUsers, "/memberOf", directoryObjects)},

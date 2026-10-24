@@ -111,6 +111,7 @@ func TestEntraReadRosterRegisters(t *testing.T) {
 		"entra_role":    {"definitions", "assignments", "eligibility"},
 		"entra_license": {"skus"},
 		"entra_org":     {"info"},
+		"entra_health":  {"services", "issues", "messages"},
 		"entra_audit":   {"search"},
 		"entra_signin":  {"search"},
 		"entra_risk":    {"risky_users", "risk_detections"},

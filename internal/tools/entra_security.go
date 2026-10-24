@@ -19,6 +19,7 @@ type logKind struct {
 	licence string
 	brief   []string
 	sub     map[string][]string
+	noTop   bool // $top isn't documented: take Graph's own page size
 }
 
 var (
@@ -34,6 +35,10 @@ var (
 	entraRiskDetections = logKind{path: "/v1.0/identityProtection/riskDetections", licence: "P2",
 		brief: []string{"id", "detectedDateTime", "riskEventType", "riskLevel", "riskState", "userPrincipalName", "ipAddress", "location"},
 		sub:   map[string][]string{"location": locationBrief}}
+
+	entraRegistrations = logKind{path: "/v1.0/reports/authenticationMethods/userRegistrationDetails", licence: "P1", noTop: true,
+		brief: []string{"id", "userPrincipalName", "userDisplayName", "userType", "isAdmin", "isMfaRegistered", "isMfaCapable",
+			"isSsprRegistered", "isPasswordlessCapable", "methodsRegistered", "lastUpdatedDateTime"}}
 
 	entraCAPolicies = entraKind{path: "/v1.0/identity/conditionalAccess/policies",
 		brief: []string{"id", "displayName", "state", "modifiedDateTime"}}
@@ -78,7 +83,11 @@ func (k logKind) search(d Deps, ctx context.Context, in entraIn) (map[string]any
 		keys, sub = in.Fields, nil
 	}
 	p := graph.Params{Filter: in.Filter, Sort: in.Sort, Shape: func(m map[string]any) map[string]any { return pick(m, keys, sub) }}
-	page, err := d.Graph.List(ctx, k.path+"?$top="+strconv.Itoa(paging.Size), p, in.Cursor)
+	path := k.path
+	if !k.noTop {
+		path += "?$top=" + strconv.Itoa(paging.Size)
+	}
+	page, err := d.Graph.List(ctx, path, p, in.Cursor)
 	if k.licence != "" && graph.LicenceRefused(err) {
 		return nil, fmt.Errorf("licence: needs Entra ID %s (%w)", k.licence, err)
 	}
@@ -143,12 +152,7 @@ func init() {
 				"methods policy and each method's configuration. security_defaults: whether security defaults are on. "+
 				"Graph allows Conditional Access about 1 request per second per tenant, shared by every app; read one policy rather than many.",
 			nil,
-			entraAction{Action{Name: "conditional_access", Perms: caRead}, func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
-				if in.ID != "" {
-					return entraGet(entraCAPolicies)(d, ctx, in)
-				}
-				return entraSearch(entraCAPolicies)(d, ctx, in)
-			}},
+			entraAction{Action{Name: "conditional_access", Perms: caRead}, listOrGet(entraCAPolicies)},
 			entraAction{Action{Name: "named_locations", Perms: caRead}, entraSearch(entraNamedLocations)},
 			entraAction{Action{Name: "auth_methods_policy", Perms: []string{"Policy.Read.AuthenticationMethod", "Policy.ReadWrite.AuthenticationMethod"}},
 				entraSingle("/v1.0/policies/authenticationMethodsPolicy")},

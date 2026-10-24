@@ -7,6 +7,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -25,6 +26,14 @@ var (
 		brief: []string{"id", "displayName", "description", "isBuiltIn", "isEnabled", "templateId"}}
 	entraSkus = entraKind{path: "/v1.0/subscribedSkus",
 		brief: []string{"skuId", "skuPartNumber", "capabilityStatus", "consumedUnits", "prepaidUnits", "appliesTo"}}
+
+	// serviceID is a service health issue's (EX123456) or message's (MC123456) id.
+	serviceID     = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+	entraServices = entraKind{path: "/v1.0/admin/serviceAnnouncement/healthOverviews", brief: []string{"id", "service", "status"}}
+	entraIssues   = entraKind{path: "/v1.0/admin/serviceAnnouncement/issues", id: serviceID,
+		brief: []string{"id", "title", "service", "status", "classification", "isResolved", "startDateTime", "lastModifiedDateTime"}}
+	entraMessages = entraKind{path: "/v1.0/admin/serviceAnnouncement/messages", id: serviceID,
+		brief: []string{"id", "title", "services", "category", "severity", "isMajorChange", "actionRequiredByDateTime", "lastModifiedDateTime"}}
 
 	credentialSets = []string{"passwordCredentials", "keyCredentials"}
 	// credKeys are all of a credential that leaves the server: never
@@ -283,6 +292,17 @@ func init() {
 				"operator-declared (--entra-password-writeback): Graph has no reliable writeback flag.",
 			nil,
 			entraAction{Action{Name: "info", Perms: orgRead}, Deps.orgInfo},
+		),
+		entraTool("entra_health", "infra", "Microsoft 365 service health",
+			"services: each Microsoft 365 service's current health (id, service, status, e.g. serviceDegradation). "+
+				"issues: service incidents and advisories as briefs (id, title, service, status, classification, isResolved, "+
+				"startDateTime, lastModifiedDateTime); filter e.g. isResolved eq false; with id (such as EX123456), one issue "+
+				"in full with its posts. messages: Message Center posts as briefs (id, title, services, category, severity, "+
+				"isMajorChange, actionRequiredByDateTime, lastModifiedDateTime); with id (such as MC123456), one in full with its body.",
+			nil,
+			entraAction{Action{Name: "services", Perms: []string{"ServiceHealth.Read.All"}}, entraSearch(entraServices)},
+			entraAction{Action{Name: "issues", Perms: []string{"ServiceHealth.Read.All"}}, listOrGet(entraIssues)},
+			entraAction{Action{Name: "messages", Perms: []string{"ServiceMessage.Read.All"}}, listOrGet(entraMessages)},
 		),
 	)
 }

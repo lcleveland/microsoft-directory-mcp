@@ -57,3 +57,22 @@ func TestRoleAssignmentsNamed(t *testing.T) {
 		t.Errorf("%v", out)
 	}
 }
+
+// Service health ids aren't GUIDs: a message id reads in full, and an id
+// that would leave the collection is refused before any call.
+func TestHealthMessageByID(t *testing.T) {
+	cs, seen := entraSession(t, nil, func(r *http.Request) string {
+		return `{"id":"MC123456","title":"Change","body":{"content":"x"}}`
+	})
+	out, isErr := call(t, cs, "entra_health", map[string]any{"action": "messages", "id": "MC123456"})
+	if isErr || out["body"] == nil {
+		t.Errorf("get %v", out)
+	}
+	if _, isErr := call(t, cs, "entra_health", map[string]any{"action": "messages", "id": "../issues"}); !isErr {
+		t.Error("path id accepted")
+	}
+	rs := seen()
+	if len(rs) != 1 || rs[0].URL.Path != "/v1.0/admin/serviceAnnouncement/messages/MC123456" || rs[0].URL.Query().Has("$select") {
+		t.Errorf("requests %v", rs)
+	}
+}
