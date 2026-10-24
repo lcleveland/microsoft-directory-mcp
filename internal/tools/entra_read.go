@@ -46,6 +46,17 @@ var (
 	entraManaged = entraKind{path: "/v1.0/deviceManagement/managedDevices",
 		brief: []string{"id", "deviceName", "operatingSystem", "osVersion", "complianceState", "lastSyncDateTime", "userPrincipalName"}}
 
+	// Intune policies, apps and Autopilot; deviceStatus is a policy's per-device row.
+	intuneCompliance = entraKind{path: "/v1.0/deviceManagement/deviceCompliancePolicies",
+		brief: []string{"id", "displayName", "description", "version", "lastModifiedDateTime"}}
+	intuneConfig = entraKind{path: "/v1.0/deviceManagement/deviceConfigurations", brief: intuneCompliance.brief}
+	deviceStatus = []string{"id", "deviceDisplayName", "userPrincipalName", "status", "lastReportedDateTime"}
+	intuneApps   = entraKind{path: "/v1.0/deviceManagement/detectedApps", id: opaqueID,
+		brief: []string{"id", "displayName", "version", "publisher", "platform", "deviceCount"}}
+	intuneAutopilot = entraKind{path: "/v1.0/deviceManagement/windowsAutopilotDeviceIdentities",
+		brief: []string{"id", "serialNumber", "manufacturer", "model", "groupTag", "enrollmentState", "lastContactedDateTime",
+			"azureActiveDirectoryDeviceId", "managedDeviceId"}}
+
 	// directoryObjects selects the union of the briefs, for relations whose
 	// members are of mixed kinds; each comes back as its own kind's brief.
 	directoryObjects = slices.Compact(slices.Sorted(slices.Values(slices.Concat(entraUsers.brief, entraGroups.brief, entraDevices.brief))))
@@ -355,6 +366,16 @@ func listOrGet(k entraKind) func(Deps, context.Context, entraIn) (map[string]any
 	}
 }
 
+// listOrUnder lists k, or the rel of the object in.ID of k.
+func listOrUnder(k entraKind, rel string, def []string) func(Deps, context.Context, entraIn) (map[string]any, error) {
+	return func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
+		if in.ID != "" {
+			return d.entraList(ctx, k, rel, in, def)
+		}
+		return entraSearch(k)(d, ctx, in)
+	}
+}
+
 func related(k entraKind, rel string, def []string) func(Deps, context.Context, entraIn) (map[string]any, error) {
 	return func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
 		return d.entraList(ctx, k, rel, in, def)
@@ -398,10 +419,11 @@ func (d Deps) apiGet(ctx context.Context, in entraAPIIn) (map[string]any, error)
 }
 
 var (
-	userRead   = []string{"User.Read.All", "Directory.Read.All"}
-	groupRead  = []string{"GroupMember.Read.All", "Group.Read.All", "Directory.Read.All"}
-	deviceRead = []string{"Device.Read.All", "Directory.Read.All"}
-	intuneRead = []string{"DeviceManagementManagedDevices.Read.All", "DeviceManagementManagedDevices.ReadWrite.All"}
+	userRead         = []string{"User.Read.All", "Directory.Read.All"}
+	groupRead        = []string{"GroupMember.Read.All", "Group.Read.All", "Directory.Read.All"}
+	deviceRead       = []string{"Device.Read.All", "Directory.Read.All"}
+	intuneRead       = []string{"DeviceManagementManagedDevices.Read.All", "DeviceManagementManagedDevices.ReadWrite.All"}
+	intuneConfigRead = []string{"DeviceManagementConfiguration.Read.All", "DeviceManagementConfiguration.ReadWrite.All"}
 	// apiWritePerms are entra_api's writes: allowlisted edits of users and groups.
 	apiWritePerms = []string{"User.ReadWrite.All", "Group.ReadWrite.All", "Directory.ReadWrite.All"}
 )
@@ -474,6 +496,22 @@ func init() {
 			entraAction{Action{Name: "managed_get", Perms: intuneRead, Licence: "Intune"}, entraGet(entraManaged)},
 			entraDelete(entraDevices), entraDeviceState("disable"), entraDeviceState("enable"),
 			intuneAction("sync"), intuneAction("reboot"), intuneAction("retire"), intuneAction("wipe"),
+		),
+		entraTool("entra_intune", "devices", "Intune compliance, configuration, apps and Autopilot",
+			"Intune, read only; needs an Intune licence. compliance: compliance policies as briefs (id, displayName, "+
+				"description, version, lastModifiedDateTime); with id (a policy's), each device's status against it (id, "+
+				"deviceDisplayName, userPrincipalName, status, lastReportedDateTime); filter e.g. status eq 'nonCompliant'. "+
+				"config_profiles: configuration profiles, and with id each device's status, in the same shapes. detected_apps: "+
+				"software Intune found on managed devices (id, displayName, version, publisher, platform, deviceCount); with "+
+				"id (an app's), the managed devices that have it, as entra_device managed_search briefs. autopilot: Windows "+
+				"Autopilot devices (id, serialNumber, manufacturer, model, groupTag, enrollmentState, lastContactedDateTime, "+
+				"azureActiveDirectoryDeviceId, managedDeviceId).",
+			nil,
+			entraAction{Action{Name: "compliance", Perms: intuneConfigRead, Licence: "Intune"}, listOrUnder(intuneCompliance, "/deviceStatuses", deviceStatus)},
+			entraAction{Action{Name: "config_profiles", Perms: intuneConfigRead, Licence: "Intune"}, listOrUnder(intuneConfig, "/deviceStatuses", deviceStatus)},
+			entraAction{Action{Name: "detected_apps", Perms: intuneRead, Licence: "Intune"}, listOrUnder(intuneApps, "/managedDevices", entraManaged.brief)},
+			entraAction{Action{Name: "autopilot", Perms: []string{"DeviceManagementServiceConfig.Read.All", "DeviceManagementServiceConfig.ReadWrite.All"}, Licence: "Intune"},
+				entraSearch(intuneAutopilot)},
 		),
 		Tool{Name: "entra_api", Group: "core", Actions: []Action{{Name: "get"}, {Name: "post", Perms: apiWritePerms, Capabilities: entraCapabilities()},
 			{Name: "patch", Perms: apiWritePerms, Capabilities: entraCapabilities()}, {Name: "put", Perms: apiWritePerms, Capabilities: entraCapabilities()},

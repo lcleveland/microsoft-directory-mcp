@@ -16,7 +16,7 @@ The AD side speaks LDAP only (LDAPS, or StartTLS), plus DNS for discovery. The E
 | identity | `ad_user`, `ad_group`, `ad_ou`, `ad_object` | `entra_user`, `entra_group`, `entra_app` |
 | security | | `entra_audit`, `entra_signin`, `entra_risk`, `entra_role` |
 | policy | `ad_gpo`, `ad_policy` (password policy and PSOs) | `entra_policy` (read only) |
-| devices | `ad_computer` | `entra_device` (Entra and Intune devices), `entra_license` |
+| devices | `ad_computer` | `entra_device` (Entra and Intune devices), `entra_intune` (compliance, configuration, apps, Autopilot), `entra_license` |
 | infra | `ad_topology` | `entra_org`, `entra_health` (Microsoft 365 service health) |
 
 Each tool takes an `action`, and its description lists the actions and their parameters. A write action exists only while its capability is on. The tags in brackets are licences (see [Licences](#licences)).
@@ -37,6 +37,7 @@ Each tool takes an `action`, and its description lists the actions and their par
 | `entra_user` | search, get, member_of, devices, licenses, auth_methods, registration [P1] | disable, enable, revoke_sessions (entra-account-state); reset_password, issue_tap, delete_auth_method (entra-credentials); create, edit, set_manager, remove_manager (entra-objects); delete, restore (entra-delete); assign_license, remove_license, reprocess_licenses (entra-licenses) |
 | `entra_group` | search, get, members, owners | add_members, remove_members (entra-group-membership); create, edit (entra-objects); delete, restore (entra-delete) |
 | `entra_device` | search, get, owners, managed_search [Intune], managed_get [Intune] | disable, enable (entra-devices); delete (entra-delete); sync, reboot [Intune] (intune-device-actions); retire, wipe [Intune] (intune-retire-wipe) |
+| `entra_intune` | compliance, config_profiles, detected_apps, autopilot [Intune] | |
 | `entra_api` | get | patch of an allowlisted property (entra-objects); post, put and delete are always refused |
 | `entra_audit` | search | |
 | `entra_signin` | search [P1] | |
@@ -389,7 +390,9 @@ Each action needs any one of the permissions it accepts. This list covers every 
 | `User.Read.All` | `entra_user` search, get, licenses |
 | `GroupMember.Read.All` | `entra_group` reads, `entra_user member_of` |
 | `Device.Read.All` | `entra_device` search, get, owners; `entra_user devices` |
-| `DeviceManagementManagedDevices.Read.All` | `entra_device` managed_search, managed_get [Intune] |
+| `DeviceManagementManagedDevices.Read.All` | `entra_device` managed_search, managed_get; `entra_intune detected_apps` [Intune] |
+| `DeviceManagementConfiguration.Read.All` | `entra_intune` compliance, config_profiles [Intune] |
+| `DeviceManagementServiceConfig.Read.All` | `entra_intune autopilot` [Intune] |
 | `UserAuthenticationMethod.Read.All` | `entra_user auth_methods` |
 | `AuditLog.Read.All` | `entra_audit`, `entra_signin` [P1], `entra_user registration` (one user, or the tenant-wide report) [P1], and `signInActivity` on user gets [P1] |
 | `IdentityRiskyUser.Read.All`, `IdentityRiskEvent.Read.All` | `entra_risk` reads [P2] |
@@ -429,7 +432,7 @@ Never assign Privileged Authentication Administrator. That role exists to act on
 | Entra ID Free | everything not listed below; directory audit keeps 7 days of data |
 | Entra ID P1 | sign-in logs, `signInActivity`, the registration report; audit keeps 30 days of data |
 | Entra ID P2 | `entra_risk` (reads and writes), PIM eligibility |
-| Intune | `managed_search`, `managed_get`, and the sync, reboot, retire and wipe actions |
+| Intune | `managed_search`, `managed_get`, `entra_intune`, and the sync, reboot, retire and wipe actions |
 
 Granting a permission whose licence the tenant lacks is harmless: the probe finds the licence missing and hides the actions.
 

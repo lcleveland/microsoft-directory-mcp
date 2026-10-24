@@ -112,6 +112,7 @@ func TestEntraReadRosterRegisters(t *testing.T) {
 		"entra_license": {"skus"},
 		"entra_org":     {"info"},
 		"entra_health":  {"services", "issues", "messages"},
+		"entra_intune":  {"compliance", "config_profiles", "detected_apps", "autopilot"},
 		"entra_audit":   {"search"},
 		"entra_signin":  {"search"},
 		"entra_risk":    {"risky_users", "risk_detections"},
@@ -126,8 +127,12 @@ func TestEntraReadRosterRegisters(t *testing.T) {
 // Without an Intune licence the managed device actions are hidden.
 func TestIntuneActionsHiddenWithoutIntune(t *testing.T) {
 	cs, _ := entraSession(t, &graph.Probe{Licences: map[string]string{"P1": graph.Present, "Intune": graph.Absent}}, func(*http.Request) string { return `{}` })
-	if got := listed(t, cs)["entra_device"]; !slices.Equal(got, []string{"search", "get", "owners"}) {
-		t.Errorf("entra_device actions %v", got)
+	got := listed(t, cs)
+	if !slices.Equal(got["entra_device"], []string{"search", "get", "owners"}) {
+		t.Errorf("entra_device actions %v", got["entra_device"])
+	}
+	if _, ok := got["entra_intune"]; ok {
+		t.Error("entra_intune listed without Intune")
 	}
 }
 
@@ -314,5 +319,32 @@ func TestGroupGetCounts(t *testing.T) {
 	out, isErr := call(t, cs, "entra_group", map[string]any{"action": "get", "id": "00000000-0000-0000-0000-000000000001"})
 	if oc, _ := out["ownerCount"].(string); isErr || out["memberCount"] != float64(12) || !strings.HasPrefix(oc, "unavailable") {
 		t.Errorf("%v", out)
+	}
+}
+
+// Intune lists select their brief; with id they list the devices under
+// the policy or app, the app's id not being a GUID.
+func TestIntuneListOrDevices(t *testing.T) {
+	cs, seen := entraSession(t, nil, func(*http.Request) string { return `{"value":[]}` })
+	const pol = "00000000-0000-0000-0000-0000000000a1"
+	for _, args := range []map[string]any{
+		{"action": "compliance"},
+		{"action": "compliance", "id": pol, "filter": "status eq 'nonCompliant'"},
+		{"action": "detected_apps", "id": "0000c1a6b6e1e5bf2b8f5b6c2f7f3e9b0000000000000000"},
+	} {
+		if out, isErr := call(t, cs, "entra_intune", args); isErr {
+			t.Fatal(out)
+		}
+	}
+	rs := seen()
+	want := []string{
+		"/v1.0/deviceManagement/deviceCompliancePolicies id,displayName,description,version,lastModifiedDateTime",
+		"/v1.0/deviceManagement/deviceCompliancePolicies/" + pol + "/deviceStatuses id,deviceDisplayName,userPrincipalName,status,lastReportedDateTime",
+		"/v1.0/deviceManagement/detectedApps/0000c1a6b6e1e5bf2b8f5b6c2f7f3e9b0000000000000000/managedDevices " + strings.Join(entraManaged.brief, ","),
+	}
+	for i, r := range rs {
+		if got := r.URL.Path + " " + r.URL.Query().Get("$select"); got != want[i] {
+			t.Errorf("request %d: %s", i, got)
+		}
 	}
 }

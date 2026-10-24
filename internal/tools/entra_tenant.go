@@ -27,12 +27,13 @@ var (
 	entraSkus = entraKind{path: "/v1.0/subscribedSkus",
 		brief: []string{"skuId", "skuPartNumber", "capabilityStatus", "consumedUnits", "prepaidUnits", "appliesTo"}}
 
-	// serviceID is a service health issue's (EX123456) or message's (MC123456) id.
-	serviceID     = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+	// opaqueID is an id that isn't a GUID: a service health issue's
+	// (EX123456) or message's (MC123456), or an Intune detected app's.
+	opaqueID      = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 	entraServices = entraKind{path: "/v1.0/admin/serviceAnnouncement/healthOverviews", brief: []string{"id", "service", "status"}}
-	entraIssues   = entraKind{path: "/v1.0/admin/serviceAnnouncement/issues", id: serviceID,
+	entraIssues   = entraKind{path: "/v1.0/admin/serviceAnnouncement/issues", id: opaqueID,
 		brief: []string{"id", "title", "service", "status", "classification", "isResolved", "startDateTime", "lastModifiedDateTime"}}
-	entraMessages = entraKind{path: "/v1.0/admin/serviceAnnouncement/messages", id: serviceID,
+	entraMessages = entraKind{path: "/v1.0/admin/serviceAnnouncement/messages", id: opaqueID,
 		brief: []string{"id", "title", "services", "category", "severity", "isMajorChange", "actionRequiredByDateTime", "lastModifiedDateTime"}}
 
 	credentialSets = []string{"passwordCredentials", "keyCredentials"}
