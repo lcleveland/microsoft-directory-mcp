@@ -103,20 +103,21 @@ func TestEntraReadRosterRegisters(t *testing.T) {
 	cs, _ := entraSession(t, nil, func(*http.Request) string { return `{}` })
 	got := listed(t, cs)
 	for name, want := range map[string][]string{
-		"entra_user":    {"search", "get", "member_of", "devices", "licenses", "auth_methods", "registration"},
-		"entra_group":   {"search", "get", "members", "owners"},
-		"entra_device":  {"search", "get", "owners", "managed_search", "managed_get"},
-		"entra_api":     {"get"},
-		"entra_app":     {"search_sps", "get_sp", "search_apps", "get_app", "expiring_credentials"},
-		"entra_role":    {"definitions", "assignments", "eligibility"},
-		"entra_license": {"skus"},
-		"entra_org":     {"info"},
-		"entra_health":  {"services", "issues", "messages"},
-		"entra_intune":  {"compliance", "config_profiles", "detected_apps", "autopilot"},
-		"entra_audit":   {"search"},
-		"entra_signin":  {"search"},
-		"entra_risk":    {"risky_users", "risk_detections"},
-		"entra_policy":  {"conditional_access", "named_locations", "auth_methods_policy", "security_defaults"},
+		"entra_user":     {"search", "get", "member_of", "devices", "licenses", "auth_methods", "registration"},
+		"entra_group":    {"search", "get", "members", "owners"},
+		"entra_device":   {"search", "get", "owners", "managed_search", "managed_get"},
+		"entra_api":      {"get"},
+		"entra_app":      {"search_sps", "get_sp", "search_apps", "get_app", "expiring_credentials"},
+		"entra_role":     {"definitions", "assignments", "eligibility"},
+		"entra_license":  {"skus"},
+		"entra_org":      {"info"},
+		"entra_health":   {"services", "issues", "messages"},
+		"entra_intune":   {"compliance", "config_profiles", "detected_apps", "autopilot"},
+		"entra_defender": {"incidents", "alerts"},
+		"entra_audit":    {"search"},
+		"entra_signin":   {"search"},
+		"entra_risk":     {"risky_users", "risk_detections"},
+		"entra_policy":   {"conditional_access", "named_locations", "auth_methods_policy", "security_defaults"},
 	} {
 		if !slices.Equal(got[name], want) {
 			t.Errorf("%s: actions %v, want %v", name, got[name], want)

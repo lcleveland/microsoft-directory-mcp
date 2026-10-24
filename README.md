@@ -14,7 +14,7 @@ The AD side speaks LDAP only (LDAPS, or StartTLS), plus DNS for discovery. The E
 |---|---|---|
 | core (always on) | `ad_status`, `ad_api` (raw LDAP search) | `entra_status`, `entra_api` (raw Graph) |
 | identity | `ad_user`, `ad_group`, `ad_ou`, `ad_object` | `entra_user`, `entra_group`, `entra_app` |
-| security | | `entra_audit`, `entra_signin`, `entra_risk`, `entra_role` |
+| security | | `entra_audit`, `entra_signin`, `entra_risk`, `entra_role`, `entra_defender` (Defender XDR) |
 | policy | `ad_gpo`, `ad_policy` (password policy and PSOs) | `entra_policy` (read only) |
 | devices | `ad_computer` | `entra_device` (Entra and Intune devices), `entra_intune` (compliance, configuration, apps, Autopilot), `entra_license` |
 | infra | `ad_topology` | `entra_org`, `entra_health` (Microsoft 365 service health) |
@@ -45,6 +45,7 @@ Each tool takes an `action`, and its description lists the actions and their par
 | `entra_policy` | conditional_access, named_locations, auth_methods_policy, security_defaults | |
 | `entra_app` | search_sps, get_sp, search_apps, get_app, expiring_credentials | |
 | `entra_role` | definitions, assignments, eligibility [P2] | |
+| `entra_defender` | incidents, alerts [Defender] | |
 | `entra_license` | skus | |
 | `entra_org` | info | |
 | `entra_health` | services, issues, messages | |
@@ -396,6 +397,7 @@ Each action needs any one of the permissions it accepts. This list covers every 
 | `UserAuthenticationMethod.Read.All` | `entra_user auth_methods` |
 | `AuditLog.Read.All` | `entra_audit`, `entra_signin` [P1], `entra_user registration` (one user, or the tenant-wide report) [P1], and `signInActivity` on user gets [P1] |
 | `IdentityRiskyUser.Read.All`, `IdentityRiskEvent.Read.All` | `entra_risk` reads [P2] |
+| `SecurityIncident.Read.All`, `SecurityAlert.Read.All` | `entra_defender` incidents; alerts [Defender] |
 | `Policy.Read.All`, `Policy.Read.AuthenticationMethod` | `entra_policy` |
 | `Application.Read.All` | `entra_app` |
 | `RoleManagement.Read.Directory` | `entra_role` definitions, assignments, eligibility [P2]; the protected-target check before every user write |
@@ -432,6 +434,7 @@ Never assign Privileged Authentication Administrator. That role exists to act on
 | Entra ID Free | everything not listed below; directory audit keeps 7 days of data |
 | Entra ID P1 | sign-in logs, `signInActivity`, the registration report; audit keeps 30 days of data |
 | Entra ID P2 | `entra_risk` (reads and writes), PIM eligibility |
+| Microsoft Defender XDR (for example Defender for Endpoint P2, Business Premium or E5) | `entra_defender`. The probe doesn't check it: without it, Graph refuses the call |
 | Intune | `managed_search`, `managed_get`, `entra_intune`, and the sync, reboot, retire and wipe actions |
 
 Granting a permission whose licence the tenant lacks is harmless: the probe finds the licence missing and hides the actions.

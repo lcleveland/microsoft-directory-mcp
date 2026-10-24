@@ -40,6 +40,14 @@ var (
 		brief: []string{"id", "userPrincipalName", "userDisplayName", "userType", "isAdmin", "isMfaRegistered", "isMfaCapable",
 			"isSsprRegistered", "isPasswordlessCapable", "methodsRegistered", "lastUpdatedDateTime"}}
 
+	// Defender XDR; ids are numbers (incidents) or opaque strings (alerts).
+	entraIncidents = logKind{path: "/v1.0/security/incidents", noTop: true,
+		brief: []string{"id", "displayName", "severity", "status", "classification", "determination", "assignedTo",
+			"createdDateTime", "lastUpdateDateTime", "incidentWebUrl"}}
+	entraAlerts = logKind{path: "/v1.0/security/alerts_v2", noTop: true,
+		brief: []string{"id", "title", "severity", "status", "serviceSource", "detectionSource", "incidentId",
+			"createdDateTime", "lastUpdateDateTime", "alertWebUrl"}}
+
 	entraCAPolicies = entraKind{path: "/v1.0/identity/conditionalAccess/policies",
 		brief: []string{"id", "displayName", "state", "modifiedDateTime"}}
 	entraNamedLocations = entraKind{path: "/v1.0/identity/conditionalAccess/namedLocations"}
@@ -97,6 +105,14 @@ func (k logKind) search(d Deps, ctx context.Context, in entraIn) (map[string]any
 	return obj(page), nil
 }
 
+// searchOrGet lists k as briefs, or reads the object in.ID of k in full.
+func (k logKind) searchOrGet(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
+	if in.ID != "" {
+		return entraGet(entraKind{path: k.path, id: opaqueID})(d, ctx, in)
+	}
+	return k.search(d, ctx, in)
+}
+
 // entraSingle reads the single object at path, such as a policy.
 func entraSingle(path string) func(Deps, context.Context, entraIn) (map[string]any, error) {
 	return func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
@@ -144,6 +160,19 @@ func init() {
 			entraAction{Action{Name: "risky_users", Perms: []string{"IdentityRiskyUser.Read.All", "IdentityRiskyUser.ReadWrite.All"}, Licence: "P2"}, entraRiskyUsers.search},
 			entraAction{Action{Name: "risk_detections", Perms: []string{"IdentityRiskEvent.Read.All"}, Licence: "P2"}, entraRiskDetections.search},
 			entraRiskAction("confirm_compromised"), entraRiskAction("dismiss"),
+		),
+		entraTool("entra_defender", "security", "Microsoft Defender XDR incidents and alerts",
+			"Defender XDR, read only; needs a Defender licence (Graph refuses otherwise). incidents: incidents as briefs "+
+				"(id, displayName, severity, status, classification, determination, assignedTo, createdDateTime, "+
+				"lastUpdateDateTime, incidentWebUrl); filter on those but displayName and incidentWebUrl, e.g. status eq "+
+				"'active'; with id, one incident in full. alerts: alerts as briefs (id, title, severity, status, "+
+				"serviceSource, detectionSource, incidentId, createdDateTime, lastUpdateDateTime, alertWebUrl); filter on "+
+				"severity, status, classification, determination, assignedTo, serviceSource, createdDateTime or "+
+				"lastUpdateDateTime; with id, one alert in full with its evidence. Neither takes sort. fields returns those "+
+				"top-level properties of each entry instead of the brief.",
+			nil,
+			entraAction{Action{Name: "incidents", Perms: []string{"SecurityIncident.Read.All", "SecurityIncident.ReadWrite.All"}}, entraIncidents.searchOrGet},
+			entraAction{Action{Name: "alerts", Perms: []string{"SecurityAlert.Read.All", "SecurityAlert.ReadWrite.All"}}, entraAlerts.searchOrGet},
 		),
 		entraTool("entra_policy", "policy", "Entra ID policies",
 			"Tenant policies, read only. conditional_access: Conditional Access policies as briefs (id, displayName, "+

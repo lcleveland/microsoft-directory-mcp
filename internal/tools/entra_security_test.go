@@ -152,3 +152,30 @@ func TestRegistrationReport(t *testing.T) {
 		t.Errorf("query %v", q)
 	}
 }
+
+// Defender lists cut to the brief without $top or $select; an alert id
+// that isn't a GUID reads the alert in full.
+func TestDefenderListAndGet(t *testing.T) {
+	const alert = "da637551227677560813_-961444813"
+	cs, seen := entraSession(t, nil, func(r *http.Request) string {
+		if strings.HasSuffix(r.URL.Path, "/incidents") {
+			return `{"value":[{"id":"2972395","displayName":"Multi-stage","severity":"high","status":"active","comments":[],"alerts":[]}]}`
+		}
+		return `{"id":"` + alert + `","title":"Suspicious","evidence":[{"@odata.type":"#microsoft.graph.security.deviceEvidence"}]}`
+	})
+	list, isErr := call(t, cs, "entra_defender", map[string]any{"action": "incidents", "filter": "status eq 'active'"})
+	if got := fmt.Sprint(list["results"]); isErr || got != "[map[displayName:Multi-stage id:2972395 severity:high status:active]]" {
+		t.Errorf("incidents %v", list)
+	}
+	got, isErr := call(t, cs, "entra_defender", map[string]any{"action": "alerts", "id": alert})
+	if isErr || got["evidence"] == nil {
+		t.Errorf("alert %v", got)
+	}
+	rs := seen()
+	if q := rs[0].URL.Query(); q.Has("$top") || q.Has("$select") || q.Get("$filter") != "status eq 'active'" {
+		t.Errorf("list query %v", q)
+	}
+	if rs[1].URL.Path != "/v1.0/security/alerts_v2/"+alert || rs[1].URL.Query().Has("$select") {
+		t.Errorf("get %s", rs[1].URL)
+	}
+}
