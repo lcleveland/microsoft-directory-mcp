@@ -299,7 +299,7 @@ func TestEntraAccountStateRegisters(t *testing.T) {
 	cs, _ := entraSession(t, nil, func(*http.Request) string { return `{}` }, "entra-account-state")
 	got := listed(t, cs)
 	for name, want := range map[string][]string{
-		"entra_user": {"search", "get", "member_of", "devices", "licenses", "auth_methods", "registration", "disable", "enable", "revoke_sessions"},
+		"entra_user": {"search", "get", "member_of", "direct_reports", "app_assignments", "devices", "licenses", "auth_methods", "registration", "disable", "enable", "revoke_sessions"},
 		"entra_api":  {"get", "post", "patch", "put", "delete"},
 	} {
 		if !slices.Equal(got[name], want) {

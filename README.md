@@ -24,9 +24,9 @@ Each tool takes an `action`, and its description lists the actions and their par
 | Tool | Read actions | Write actions (capability) |
 |---|---|---|
 | `ad_status` | connectivity, bind, each domain's PDC emulator, the probe, visible and hidden actions | |
-| `ad_user` | search, get, resultant_policy, lockout | disable, enable, unlock, must_change, set_expiry (ad-account-state); reset_password (ad-passwords); create (ad-objects) |
+| `ad_user` | search, get, resultant_policy, lockout, last_logon | disable, enable, unlock, must_change, set_expiry (ad-account-state); reset_password (ad-passwords); create (ad-objects) |
 | `ad_group` | search, get, members | add_members, remove_members (ad-group-membership); create (ad-objects) |
-| `ad_computer` | search, get | disable, enable, set_expiry (ad-account-state); create (ad-objects) |
+| `ad_computer` | search, get, last_logon | disable, enable, set_expiry (ad-account-state); create (ad-objects) |
 | `ad_ou` | search, get, tree | |
 | `ad_object` | get, search_deleted | edit, rename, move (ad-objects); delete, restore (ad-delete) |
 | `ad_gpo` | search, get, links | link, unlink, block_inheritance (ad-gpo-links) |
@@ -34,7 +34,7 @@ Each tool takes an `action`, and its description lists the actions and their par
 | `ad_topology` | domains, trusts, sites, subnets, dcs, fsmo, replication | |
 | `ad_api` | search | modify of an allowlisted attribute (ad-objects); add, rename and delete are always refused |
 | `entra_status` | token, cloud, sync state, declared writeback, the probe, visible and hidden actions | |
-| `entra_user` | search, get, member_of, devices, licenses, auth_methods, registration [P1] | disable, enable, revoke_sessions (entra-account-state); reset_password, issue_tap, delete_auth_method (entra-credentials); create, edit, set_manager, remove_manager (entra-objects); delete, restore (entra-delete); assign_license, remove_license, reprocess_licenses (entra-licenses) |
+| `entra_user` | search, get, member_of, direct_reports, app_assignments, devices, licenses, auth_methods, registration [P1] | disable, enable, revoke_sessions (entra-account-state); reset_password, issue_tap, delete_auth_method (entra-credentials); create, edit, set_manager, remove_manager (entra-objects); delete, restore (entra-delete); assign_license, remove_license, reprocess_licenses (entra-licenses) |
 | `entra_group` | search, get, members, owners | add_members, remove_members (entra-group-membership); create, edit (entra-objects); delete, restore (entra-delete) |
 | `entra_device` | search, get, owners, managed_search [Intune], managed_get [Intune] | disable, enable (entra-devices); delete (entra-delete); sync, reboot [Intune] (intune-device-actions); retire, wipe [Intune] (intune-retire-wipe) |
 | `entra_intune` | compliance, config_profiles, detected_apps, autopilot [Intune] | |
@@ -388,7 +388,8 @@ Each action needs any one of the permissions it accepts. This list covers every 
 
 | Permission | Used by |
 |---|---|
-| `User.Read.All` | `entra_user` search, get, licenses |
+| `User.Read.All` | `entra_user` search, get, licenses, direct_reports |
+| `Directory.Read.All` | `entra_user app_assignments` (no narrower permission reads a user's app role assignments) |
 | `GroupMember.Read.All` | `entra_group` reads, `entra_user member_of` |
 | `Device.Read.All` | `entra_device` search, get, owners; `entra_user devices` |
 | `DeviceManagementManagedDevices.Read.All` | `entra_device` managed_search, managed_get; `entra_intune detected_apps` [Intune] |

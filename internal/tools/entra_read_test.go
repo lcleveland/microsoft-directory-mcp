@@ -103,7 +103,7 @@ func TestEntraReadRosterRegisters(t *testing.T) {
 	cs, _ := entraSession(t, nil, func(*http.Request) string { return `{}` })
 	got := listed(t, cs)
 	for name, want := range map[string][]string{
-		"entra_user":     {"search", "get", "member_of", "devices", "licenses", "auth_methods", "registration"},
+		"entra_user":     {"search", "get", "member_of", "direct_reports", "app_assignments", "devices", "licenses", "auth_methods", "registration"},
 		"entra_group":    {"search", "get", "members", "owners"},
 		"entra_device":   {"search", "get", "owners", "managed_search", "managed_get"},
 		"entra_api":      {"get"},
@@ -344,6 +344,32 @@ func TestIntuneListOrDevices(t *testing.T) {
 		"/v1.0/deviceManagement/detectedApps/0000c1a6b6e1e5bf2b8f5b6c2f7f3e9b0000000000000000/managedDevices " + strings.Join(entraManaged.brief, ","),
 	}
 	for i, r := range rs {
+		if got := r.URL.Path + " " + r.URL.Query().Get("$select"); got != want[i] {
+			t.Errorf("request %d: %s", i, got)
+		}
+	}
+}
+
+// member_of with transitive reads transitiveMemberOf; direct_reports and
+// app_assignments read their relations with their own field sets.
+func TestUserRelations(t *testing.T) {
+	cs, seen := entraSession(t, nil, func(*http.Request) string { return `{"value":[]}` })
+	const id = "00000000-0000-0000-0000-0000000000b1"
+	for _, args := range []map[string]any{
+		{"action": "member_of", "id": id, "transitive": true},
+		{"action": "direct_reports", "id": id},
+		{"action": "app_assignments", "id": id},
+	} {
+		if out, isErr := call(t, cs, "entra_user", args); isErr {
+			t.Fatal(out)
+		}
+	}
+	want := []string{
+		"/v1.0/users/" + id + "/transitiveMemberOf " + strings.Join(directoryObjects, ","),
+		"/v1.0/users/" + id + "/directReports " + strings.Join(directoryObjects, ","),
+		"/v1.0/users/" + id + "/appRoleAssignments id,appRoleId,resourceId,resourceDisplayName,principalType,createdDateTime",
+	}
+	for i, r := range seen() {
 		if got := r.URL.Path + " " + r.URL.Query().Get("$select"); got != want[i] {
 			t.Errorf("request %d: %s", i, got)
 		}

@@ -458,17 +458,26 @@ func (c *Client) Lockout(ctx context.Context, e *ldap.Entry) (*Lockout, error) {
 	if err != nil {
 		return nil, err
 	}
-	attrs := []string{"badPwdCount", "badPasswordTime"}
-	l.PerDC, l.Skipped, err = PerDC(ctx, c, d, func(conn Conn, dc string) (map[string]any, error) {
-		res, err := conn.Search(ldap.NewSearchRequest(e.DN, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 1, 0, false, "(objectClass=*)", attrs, nil))
+	l.PerDC, l.Skipped, err = c.perDC(ctx, d, e.DN, []string{"badPwdCount", "badPasswordTime"})
+	if err != nil {
+		return nil, err
+	}
+	return l, nil
+}
+
+// perDC reads attrs of dn, which don't replicate, from every DC of its
+// domain d: one row per DC, tagged with the DC and sorted by it.
+func (c *Client) perDC(ctx context.Context, d Domain, dn string, attrs []string) ([]map[string]any, []Skipped, error) {
+	rows, skipped, err := PerDC(ctx, c, d, func(conn Conn, dc string) (map[string]any, error) {
+		res, err := conn.Search(ldap.NewSearchRequest(dn, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 1, 0, false, "(objectClass=*)", attrs, nil))
 		if ldap.IsErrorWithCode(err, ldap.LDAPResultNoSuchObject) {
-			return map[string]any{"dc": dc, "note": "the user has not replicated here yet"}, nil
+			return map[string]any{"dc": dc, "note": "the object has not replicated here yet"}, nil
 		}
 		if err != nil {
 			return nil, err
 		}
 		if len(res.Entries) != 1 {
-			return nil, fmt.Errorf("%s: %d entries", e.DN, len(res.Entries))
+			return nil, fmt.Errorf("%s: %d entries", dn, len(res.Entries))
 		}
 		m := Decode(res.Entries[0], attrs)
 		delete(m, "dn")
@@ -476,8 +485,38 @@ func (c *Client) Lockout(ctx context.Context, e *ldap.Entry) (*Lockout, error) {
 		return m, nil
 	})
 	if err != nil {
+		return nil, nil, err
+	}
+	slices.SortFunc(rows, func(a, b map[string]any) int { return cmp.Compare(a["dc"].(string), b["dc"].(string)) })
+	return rows, skipped, nil
+}
+
+// LastLogon is an account's lastLogon, which each DC keeps for itself.
+type LastLogon struct {
+	DN        string           `json:"dn"`
+	LastLogon any              `json:"lastLogon"`              // the latest over the DCs read; null for never
+	DC        string           `json:"lastLogon_dc,omitempty"` // the DC that holds it
+	PerDC     []map[string]any `json:"per_dc"`
+	Skipped   []Skipped        `json:"_skipped,omitempty"`
+}
+
+// LastLogon reads dn's lastLogon from every DC of its domain and keeps the
+// latest. A DC in Skipped may hold a later one.
+func (c *Client) LastLogon(ctx context.Context, dn string) (*LastLogon, error) {
+	d, err := c.DomainOf(ctx, dn)
+	if err != nil {
 		return nil, err
 	}
-	slices.SortFunc(l.PerDC, func(a, b map[string]any) int { return cmp.Compare(a["dc"].(string), b["dc"].(string)) })
+	l := &LastLogon{DN: dn}
+	if l.PerDC, l.Skipped, err = c.perDC(ctx, d, dn, []string{"lastLogon"}); err != nil {
+		return nil, err
+	}
+	latest := ""
+	for _, r := range l.PerDC {
+		// Decode writes RFC 3339 UTC of one width, so later sorts higher.
+		if t, ok := r["lastLogon"].(string); ok && t > latest {
+			latest, l.LastLogon, l.DC = t, t, r["dc"].(string)
+		}
+	}
 	return l, nil
 }

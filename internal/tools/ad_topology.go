@@ -51,6 +51,29 @@ func (d Deps) lockout(ctx context.Context, in adIn) (map[string]any, error) {
 	return obj(l), nil
 }
 
+// lastLogon is ad_user and ad_computer last_logon: the account's lastLogon
+// from every DC of its domain.
+func lastLogon(k adKind) adExtra {
+	return adExtra{Action: Action{Name: "last_logon"}, run: func(d Deps, ctx context.Context, in adIn) (map[string]any, error) {
+		if in.ID == "" {
+			return nil, errors.New("last_logon needs id")
+		}
+		dn, err := d.AD.Resolve(ctx, in.ID, k.class)
+		if err != nil {
+			return nil, err
+		}
+		l, err := d.AD.LastLogon(ctx, dn)
+		if err != nil {
+			return nil, err
+		}
+		return obj(l), nil
+	}}
+}
+
+const lastLogonDoc = " last_logon: the account's true last logon by id: lastLogon, which each DC keeps for itself, read " +
+	"from every DC of its domain; the latest as lastLogon with the DC holding it as lastLogon_dc (null: never), and " +
+	"per_dc. A DC that can't be reached is in _skipped and may hold a later one."
+
 var adTopologyTool = Tool{Name: "ad_topology", Group: "infra", Actions: []Action{{Name: "domains"}, {Name: "trusts"},
 	{Name: "sites"}, {Name: "subnets"}, {Name: "dcs"}, {Name: "fsmo"}, {Name: "replication", ADProbe: "repl-read"}},
 	add: func(s *mcp.Server, d Deps, t Tool, visible []string) {

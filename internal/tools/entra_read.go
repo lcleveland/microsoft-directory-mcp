@@ -104,7 +104,7 @@ type entraIn struct {
 	Fields []string `json:"fields,omitempty" jsonschema:"Graph property names to return instead of the default set"`
 	Cursor string   `json:"cursor,omitempty" jsonschema:"next_cursor from the previous call with the same arguments, unchanged"`
 	// Only on entra_group.
-	Transitive bool `json:"transitive,omitempty" jsonschema:"entra_group members: every nested member, not only direct ones"`
+	Transitive bool `json:"transitive,omitempty" jsonschema:"entra_group members, entra_user member_of: nested ones too, not only direct ones"`
 	// Only on entra_user.
 	MustChange *bool    `json:"must_change,omitempty" jsonschema:"writes, reset_password: make the user change the password at next sign-in; default true"`
 	MethodID   string   `json:"method_id,omitempty" jsonschema:"writes, delete_auth_method: the id of the authentication method, from auth_methods"`
@@ -436,7 +436,10 @@ func init() {
 				"get: one user by id or UPN, with on-premises sAMAccountName and last sync, jobTitle, department, manager, "+
 				"assignedLicenses (with skuPartNumber), lastPasswordChangeDateTime and signInActivity (needs P1; listed in "+
 				"_omitted when the tenant lacks it). member_of: the groups, directory roles and administrative units the user "+
-				"is a direct member of. devices: the devices the user owns or registered, each with relation. licenses: "+
+				"is a direct member of; transitive=true adds those it is in through nesting. direct_reports: the users (and "+
+				"contacts) whose manager the user is. app_assignments: the app roles assigned to the user directly (id, "+
+				"appRoleId, resourceId and resourceDisplayName of the enterprise app, principalType, createdDateTime); "+
+				"those it has through a group are on the group. devices: the devices the user owns or registered, each with relation. licenses: "+
 				"assignedLicenses and licenseAssignmentStates (direct or group-inherited, errors), with skuPartNumber. "+
 				"auth_methods: the user's registered authentication methods. registration: the user's MFA and SSPR "+
 				"registration details (P1); without id, every user's as briefs (id, userPrincipalName, userDisplayName, "+
@@ -444,7 +447,16 @@ func init() {
 				"lastUpdatedDateTime), filtered on those, e.g. isMfaRegistered eq false."+counterpartDoc, entraUserDoc,
 			entraAction{Action{Name: "search", Perms: userRead}, entraSearch(entraUsers)},
 			entraAction{Action{Name: "get", Perms: userRead}, Deps.userGet},
-			entraAction{Action{Name: "member_of", Perms: groupRead}, related(entraUsers, "/memberOf", directoryObjects)},
+			entraAction{Action{Name: "member_of", Perms: groupRead}, func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
+				rel := "/memberOf"
+				if in.Transitive {
+					rel = "/transitiveMemberOf"
+				}
+				return d.entraList(ctx, entraUsers, rel, in, directoryObjects)
+			}},
+			entraAction{Action{Name: "direct_reports", Perms: userRead}, related(entraUsers, "/directReports", directoryObjects)},
+			entraAction{Action{Name: "app_assignments", Perms: []string{"Directory.Read.All", "AppRoleAssignment.ReadWrite.All"}},
+				related(entraUsers, "/appRoleAssignments", []string{"id", "appRoleId", "resourceId", "resourceDisplayName", "principalType", "createdDateTime"})},
 			entraAction{Action{Name: "devices", Perms: deviceRead}, Deps.userDevices},
 			entraAction{Action{Name: "licenses", Perms: userRead}, func(d Deps, ctx context.Context, in entraIn) (map[string]any, error) {
 				out, err := d.entraObject(ctx, entraUsers, in, []string{"id", "userPrincipalName", "assignedLicenses", "licenseAssignmentStates"})

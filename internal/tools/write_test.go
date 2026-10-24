@@ -275,8 +275,8 @@ func TestAccountStateRegisters(t *testing.T) {
 	ctx := context.Background()
 	got := listed(t, cs)
 	for name, want := range map[string][]string{
-		"ad_user":     {"search", "get", "resultant_policy", "lockout", "disable", "enable", "unlock", "must_change", "set_expiry"},
-		"ad_computer": {"search", "get", "disable", "enable", "set_expiry"},
+		"ad_user":     {"search", "get", "resultant_policy", "lockout", "last_logon", "disable", "enable", "unlock", "must_change", "set_expiry"},
+		"ad_computer": {"search", "get", "last_logon", "disable", "enable", "set_expiry"},
 		"ad_api":      {"search", "modify"},
 		"ad_group":    {"search", "get", "members"},
 	} {
@@ -464,7 +464,7 @@ func TestPasswordsAndMembershipRegister(t *testing.T) {
 	cs := writeSession(t, "ad-passwords", "ad-group-membership")
 	got := listed(t, cs)
 	for name, want := range map[string][]string{
-		"ad_user":  {"search", "get", "resultant_policy", "lockout", "reset_password"},
+		"ad_user":  {"search", "get", "resultant_policy", "lockout", "last_logon", "reset_password"},
 		"ad_group": {"search", "get", "members", "add_members", "remove_members"},
 	} {
 		if !slices.Equal(got[name], want) {
@@ -655,8 +655,8 @@ func TestObjectsAndDeleteRegister(t *testing.T) {
 	cs := writeSession(t, "ad-objects", "ad-delete")
 	got := listed(t, cs)
 	for name, want := range map[string][]string{
-		"ad_user":     {"search", "get", "resultant_policy", "lockout", "create"},
-		"ad_computer": {"search", "get", "create"},
+		"ad_user":     {"search", "get", "resultant_policy", "lockout", "last_logon", "create"},
+		"ad_computer": {"search", "get", "last_logon", "create"},
 		"ad_group":    {"search", "get", "members", "create"},
 		"ad_object":   {"get", "search_deleted", "edit", "rename", "move", "delete", "restore"},
 	} {

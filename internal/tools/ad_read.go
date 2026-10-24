@@ -560,8 +560,9 @@ func init() {
 				"out, as LDAP shows it: lockoutTime, msDS-User-Account-Control-Computed flags (LOCKOUT), lockoutTime_origin "+
 				"(the DC that originated the last lockoutTime write, from replication metadata) and per_dc badPwdCount and "+
 				"badPasswordTime from every DC of the user's domain (they don't replicate; unreachable DCs in _skipped). "+
-				"The machine the bad passwords came from (event 4740) is not read."+counterpartDoc, adUsers,
+				"The machine the bad passwords came from (event 4740) is not read."+lastLogonDoc+counterpartDoc, adUsers,
 			adExtra{Action: Action{Name: "resultant_policy", ADProbe: "pso-read"}, run: Deps.resultantPolicy}, adExtra{Action: Action{Name: "lockout"}, run: Deps.lockout},
+			lastLogon(adUsers),
 			accountState("ad_user", adUsers, "disable"), accountState("ad_user", adUsers, "enable"), accountState("ad_user", adUsers, "unlock"),
 			accountState("ad_user", adUsers, "must_change"), accountState("ad_user", adUsers, "set_expiry"), resetPassword,
 			createAction("ad_user", "user")),
@@ -605,7 +606,7 @@ func init() {
 			"Computer accounts of the forest. search: list computers as briefs (dn, sAMAccountName, dNSHostName, "+
 				"enabled, objectSid, lastLogonTimestamp, whenCreated). get: one computer by id, with operating system "+
 				"and version, managedBy, servicePrincipalName, supported encryption types and the LAPS password expiry "+
-				"(never the password)."+counterpartDoc, adComputers,
+				"(never the password)."+lastLogonDoc+counterpartDoc, adComputers, lastLogon(adComputers),
 			accountState("ad_computer", adComputers, "disable"), accountState("ad_computer", adComputers, "enable"),
 			accountState("ad_computer", adComputers, "set_expiry"), createAction("ad_computer", "computer")),
 		adOUTool,

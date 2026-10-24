@@ -118,6 +118,24 @@ func TestLockoutSweepsEveryDC(t *testing.T) {
 	}
 }
 
+// lastLogon is the latest over the DCs that answer: dc3 here, its own
+// value newer than dc2's; dc4 is skipped and dc1 has never seen a logon.
+func TestLastLogonLatestDC(t *testing.T) {
+	f := newFakeDir()
+	f.kill("dc4.child.corp.example.com")
+	user := strings.ToLower("CN=ada,CN=Users," + childDN)
+	f.tree[user] = map[string][]string{"objectClass": {"user"}}
+	f.local["dc3.child.corp.example.com "+user] = map[string][]string{"lastLogon": {"134117966450000000"}}
+	c := f.client(srvConfig())
+	l, err := c.LastLogon(context.Background(), user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.LastLogon != "2026-01-02T03:04:05Z" || l.DC != "dc3.child.corp.example.com:636" || len(l.Skipped) != 1 {
+		t.Errorf("%+v", l)
+	}
+}
+
 func TestDCs(t *testing.T) {
 	f := newFakeDir()
 	f.kill("dc4.child.corp.example.com")
