@@ -102,6 +102,14 @@ func TestJoinFilter(t *testing.T) {
 	if _, err := joinFilter("(objectClass=user)", "(broken"); err == nil {
 		t.Error("broken filter: want an error")
 	}
+	for _, f := range []string{"(ms-Mcs-AdmPwd=a*)", "(!(MSLAPS-PASSWORD=*))", "(|(cn=x)(msFVE-RecoveryPassword>=1))"} {
+		if _, err := joinFilter(f); err == nil {
+			t.Errorf("%s: want a refusal", f)
+		}
+	}
+	if _, err := joinFilter("(ms-Mcs-AdmPwdExpirationTime=*)"); err != nil {
+		t.Errorf("expiry filter refused: %v", err)
+	}
 }
 
 func TestOffsetCursor(t *testing.T) {

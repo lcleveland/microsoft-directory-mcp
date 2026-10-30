@@ -36,6 +36,8 @@ func TestDecode(t *testing.T) {
 		"filetime": {map[string][]string{"pwdLastSet": {"134116992000000000"}, "accountExpires": {"0"},
 			"lockoutTime": {"9223372036854775807"}}, nil,
 			`{"accountExpires":null,"dn":"CN=u,DC=corp,DC=example,DC=com","lockoutTime":null,"pwdLastSet":"2026-01-01T00:00:00Z"}`},
+		"secrets dropped": {map[string][]string{"ms-Mcs-AdmPwd": {"pw"}, "msLAPS-EncryptedPassword": {"x"}, "cn": {"c"}}, []string{"msLAPS-EncryptedPassword"},
+			`{"cn":"c","dn":"CN=u,DC=corp,DC=example,DC=com"}`},
 		"generalized time": {map[string][]string{"whenCreated": {"20260102030405.0Z"}}, nil,
 			`{"dn":"CN=u,DC=corp,DC=example,DC=com","whenCreated":"2026-01-02T03:04:05Z"}`},
 		// 42 days, 30 minutes, never.

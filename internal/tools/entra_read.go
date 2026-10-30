@@ -401,6 +401,14 @@ func (d Deps) apiGet(ctx context.Context, in entraAPIIn) (map[string]any, error)
 	if !beta && !strings.HasPrefix(in.Path, "/v1.0/") {
 		return nil, errors.New("path must start with /v1.0/ or /beta/")
 	}
+	// Graph matches paths case-blind and unescaped; slashes are dropped so /a//b can't slip by.
+	p, _ := url.PathUnescape(in.Path)
+	p = strings.ToLower(strings.ReplaceAll(p, "/", ""))
+	for _, s := range secretPaths {
+		if strings.Contains(p, s) {
+			return nil, fmt.Errorf("path %s reads a secret (BitLocker keys, LAPS passwords, FileVault keys) no tool returns", in.Path)
+		}
+	}
 	page, o, err := d.Graph.Fetch(ctx, in.Path, graph.Params{Filter: in.Filter, Sort: in.Sort, Fields: in.Fields}, in.Cursor)
 	if err != nil {
 		return nil, err
@@ -417,6 +425,10 @@ func (d Deps) apiGet(ctx context.Context, in entraAPIIn) (map[string]any, error)
 	}
 	return out, nil
 }
+
+// secretPaths are path fragments, lowercased without slashes, that read
+// recovery keys or local admin passwords.
+var secretPaths = []string{"bitlockerrecoverykeys", "devicelocalcredentials", "getfilevaultkey"}
 
 var (
 	userRead         = []string{"User.Read.All", "Directory.Read.All"}
@@ -531,6 +543,7 @@ func init() {
 			add: func(s *mcp.Server, d Deps, t Tool, visible []string) {
 				desc := "Raw Graph GET when no entra_* tool fits. get: any path under /v1.0/ or /beta/, as " +
 					"Graph returns it; a collection pages like the entra_* lists (200 at a time, next_cursor). " +
+					"BitLocker recovery keys, LAPS passwords and FileVault keys are refused. " +
 					"Beta replies carry _unstable: beta is unsupported in production and changes without notice. " +
 					"Read the entra://guide/odata-filter resource before writing a filter."
 				if len(visible) > 1 {

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -151,11 +152,21 @@ func joinFilter(parts ...string) (string, error) {
 		}
 	}
 	f = "(&" + f + ")"
+	// A filter on a secret would leak it a guess at a time.
+	// shortcut: a secret named by OID gets past this, and Decode only drops it from replies; resolve OIDs against the schema if that matters.
+	for _, m := range filterAttr.FindAllStringSubmatch(f, -1) {
+		if ad.Secret(m[1]) {
+			return "", fmt.Errorf("filter: %s is a secret no tool reads", m[1])
+		}
+	}
 	if _, err := ldap.CompileFilter(f); err != nil {
 		return "", fmt.Errorf("filter %s: %w (see the ad://guide/ldap-filter resource)", f, err)
 	}
 	return f, nil
 }
+
+// filterAttr finds each attribute an LDAP filter tests.
+var filterAttr = regexp.MustCompile(`\(\s*!?\s*([A-Za-z0-9.;-]+)\s*(?:[~<>]?=|:)`)
 
 // obj turns a result struct into the map tools return.
 func obj(v any) map[string]any {
@@ -652,7 +663,8 @@ func init() {
 				desc := "Raw LDAP search when no ad_* tool fits. search: base (a DN), scope, filter and " +
 					"attributes, against a domain controller of the domain owning base (configuration and schema go " +
 					"to the forest root domain). Values are decoded as in the other ad_* tools; pages of 200 " +
-					"with next_cursor. Read the ad://guide/ldap-filter resource before writing a filter."
+					"with next_cursor. LAPS passwords and BitLocker recovery data are never returned, and filters or attributes " +
+					"naming them are refused. Read the ad://guide/ldap-filter resource before writing a filter."
 				if len(visible) > 1 {
 					desc += adAPIWriteDoc
 				}
@@ -673,6 +685,9 @@ func init() {
 						}
 						if in.Base == "" {
 							return nil, nil, errors.New("search needs base")
+						}
+						if i := slices.IndexFunc(in.Attributes, ad.Secret); i >= 0 {
+							return nil, nil, fmt.Errorf("attribute %s is a secret no tool reads", in.Attributes[i])
 						}
 						f, err := joinFilter(cmp.Or(in.Filter, "(objectClass=*)"))
 						if err != nil {

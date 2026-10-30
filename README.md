@@ -406,7 +406,7 @@ Each action needs any one of the permissions it accepts. This list covers every 
 | `Organization.Read.All` | `entra_org`, `entra_status` |
 | `ServiceHealth.Read.All`, `ServiceMessage.Read.All` | `entra_health` services and issues; messages |
 
-`entra_api get` can reach any v1.0 or beta path, but only within what these permissions allow. Beta replies carry `_unstable`: Microsoft doesn't support beta in production and changes it without notice. The server does not filter secret-bearing reads: grant a permission such as `DeviceLocalCredential.Read.All` (LAPS passwords) or `BitlockerKey.Read.All` (BitLocker recovery keys) and `entra_api get` returns those secrets.
+`entra_api get` can reach any v1.0 or beta path, but only within what these permissions allow. Beta replies carry `_unstable`: Microsoft doesn't support beta in production and changes it without notice. Secret-bearing paths are refused: BitLocker recovery keys (`informationProtection/bitlocker/recoveryKeys`), Windows LAPS passwords (`directory/deviceLocalCredentials`) and Intune FileVault keys (`getFileVaultKey`), whatever the permissions. Likewise no `ad_*` tool returns LAPS passwords (`ms-Mcs-AdmPwd`, `msLAPS-Password`, `msLAPS-Encrypted*`), BitLocker recovery data (`msFVE-RecoveryPassword`, `msFVE-KeyPackage`) or `msTPM-OwnerInformation`, and a filter or `ad_api` attribute naming one is refused.
 
 ### Write permissions and the directory role
 

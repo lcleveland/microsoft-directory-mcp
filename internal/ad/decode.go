@@ -26,12 +26,24 @@ var (
 		"msDS-LastKnownRDN-Time", "msTSExpireDate")
 	intervals = set("maxPwdAge", "minPwdAge", "lockoutDuration", "lockOutObservationWindow", "forceLogoff",
 		"msDS-MaximumPasswordAge", "msDS-MinimumPasswordAge", "msDS-LockoutDuration", "msDS-LockoutObservationWindow")
+	// Secrets: LAPS passwords, BitLocker recovery data and the TPM owner
+	// hash. No tool returns them, filters on them or asks for them by name.
+	secretAttrs = set("ms-Mcs-AdmPwd", "msLAPS-Password", "msLAPS-EncryptedPassword", "msLAPS-EncryptedPasswordHistory",
+		"msLAPS-EncryptedDSRMPassword", "msLAPS-EncryptedDSRMPasswordHistory", "msFVE-RecoveryPassword", "msFVE-KeyPackage",
+		"msTPM-OwnerInformation")
 	// Rendered as lists even with one value. Others are lists only with several.
 	// ponytail: a fixed list, not the schema's isSingleValued; read the schema if the inconsistency bites.
 	multiValued = set("objectClass", "memberOf", "member", "directReports", "servicePrincipalName", "proxyAddresses",
 		"sIDHistory", "tokenGroups", "dSCorePropagationData", "otherTelephone", "otherMobile", "url", "wWWHomePage",
 		"msDS-AllowedToDelegateTo", "userWorkstations", "namingContexts", "managedObjects", "msDS-PSOAppliesTo")
 )
+
+// Secret reports whether the attribute name (any case, with or without
+// ;options) is one no tool reads.
+func Secret(name string) bool {
+	name, _, _ = strings.Cut(name, ";")
+	return secretAttrs[strings.ToLower(name)]
+}
 
 func set(names ...string) map[string]bool {
 	m := map[string]bool{}
@@ -86,6 +98,9 @@ func Decode(e *ldap.Entry, named []string) map[string]any {
 	for _, a := range e.Attributes {
 		name, _, _ := strings.Cut(a.Name, ";range=") // a ranged attribute keeps its name
 		key := strings.ToLower(name)
+		if Secret(key) {
+			continue
+		}
 		var vals []any
 		for _, raw := range a.ByteValues {
 			v, ok := value(key, raw)

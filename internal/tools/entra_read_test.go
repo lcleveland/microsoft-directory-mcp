@@ -274,6 +274,20 @@ func TestAPIGetBetaUnstable(t *testing.T) {
 	}
 }
 
+func TestAPIGetRefusesSecrets(t *testing.T) {
+	cs, seen := entraSession(t, nil, func(*http.Request) string { return `{"id":"x"}` })
+	for _, p := range []string{"/v1.0/informationProtection/bitlocker/recoveryKeys/k?$select=key",
+		"/beta/InformationProtection//BitLocker/RecoveryKeys", "/v1.0/directory/deviceLocalCredentials/d",
+		"/v1.0/directory/deviceLocal%43redentials", "/beta/deviceManagement/managedDevices/m/getFileVaultKey"} {
+		if _, isErr := call(t, cs, "entra_api", map[string]any{"action": "get", "path": p}); !isErr {
+			t.Errorf("path %q accepted", p)
+		}
+	}
+	if n := len(seen()); n != 0 {
+		t.Errorf("%d calls to Graph, want 0", n)
+	}
+}
+
 // With P1 undecided, a get Graph refuses for signInActivity is retried without it.
 func TestUserGetDropsSignInOn403(t *testing.T) {
 	cs, seen := entraSession(t, &graph.Probe{Licences: map[string]string{"P1": graph.Unknown}}, func(r *http.Request) string {
