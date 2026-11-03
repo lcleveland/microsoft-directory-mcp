@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-ldap/ldap/v3"
 )
 
 const userClass = "(&(objectCategory=person)(objectClass=user))"
@@ -106,6 +108,25 @@ func TestGetReadsFromOwningDomain(t *testing.T) {
 	}
 	if _, err := c.Get(context.Background(), "CN=grp,CN=Users,"+corpDN, userClass, nil); err == nil || !strings.Contains(err.Error(), "no match") {
 		t.Errorf("group as user: %v", err)
+	}
+}
+
+func TestSecurityDescriptorIsRead(t *testing.T) {
+	f := newFakeDir()
+	seedUsers(f)
+	f.tree[strings.ToLower(solo)]["nTSecurityDescriptor"] = []string{"\x01\x00\x04\x8c"}
+	c := f.client(srvConfig())
+	attrs := []string{"ntsecuritydescriptor"}
+	e, err := c.Get(context.Background(), solo, userClass, attrs)
+	if err != nil || len(e.GetRawAttributeValue("nTSecurityDescriptor")) == 0 {
+		t.Errorf("get: %+v %v", e, err)
+	}
+	p, err := c.Search(context.Background(), Query{Base: solo, Scope: ldap.ScopeBaseObject, Filter: "(objectClass=*)", Attrs: attrs}, "")
+	if err != nil || len(p.Results) != 1 {
+		t.Fatalf("search: %+v %v", p, err)
+	}
+	if _, v := Field(p.Results[0], "nTSecurityDescriptor"); v == nil {
+		t.Errorf("search: %+v %v", p, err)
 	}
 }
 

@@ -150,7 +150,7 @@ func (p *paged) request(d Domain, size int) *ldap.SearchRequest {
 	if scope == 0 {
 		scope = ldap.ScopeWholeSubtree
 	}
-	return ldap.NewSearchRequest(base, scope, ldap.NeverDerefAliases, 0, 0, false, p.q.Filter, p.q.Attrs, controls)
+	return ldap.NewSearchRequest(base, scope, ldap.NeverDerefAliases, 0, 0, false, p.q.Filter, p.q.Attrs, sdFlags(p.q.Attrs, controls))
 }
 
 func (c *Client) queryDomains(ctx context.Context, q Query) ([]Domain, error) {

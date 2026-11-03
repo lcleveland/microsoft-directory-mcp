@@ -78,11 +78,17 @@ func (c *fakeConn) Search(req *ldap.SearchRequest) (*ldap.SearchResult, error) {
 		resp.SetCookie([]byte(next))
 		res.Controls = append(res.Controls, resp)
 	}
+	// As AD for a reader without SeSecurityPrivilege: no descriptor unless the SACL is left out.
+	sd, _ := ldap.FindControl(req.Controls, ControlTypeSDFlags).(*ldap.ControlString)
 	for _, dn := range dns {
 		attrs := c.f.tree[dn]
 		if l := c.f.local[c.host+" "+dn]; l != nil {
 			attrs = maps.Clone(attrs)
 			maps.Copy(attrs, l)
+		}
+		if _, ok := attrs["nTSecurityDescriptor"]; ok && (sd == nil || sd.ControlValue != "\x30\x03\x02\x01\x07") {
+			attrs = maps.Clone(attrs)
+			delete(attrs, "nTSecurityDescriptor")
 		}
 		res.Entries = append(res.Entries, ldap.NewEntry(dn, selectAttrs(attrs, req.Attributes)))
 	}

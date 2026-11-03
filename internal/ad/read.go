@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/go-ldap/ldap/v3"
@@ -12,6 +13,20 @@ import (
 
 // ErrNoMatch is wrapped by Resolve and Get when no object matches.
 var ErrNoMatch = errors.New("no match")
+
+// ControlTypeSDFlags is LDAP_SERVER_SD_FLAGS_OID.
+const ControlTypeSDFlags = "1.2.840.113556.1.4.801"
+
+// sdFlags adds the SD flags control (owner, group, DACL) to controls when
+// attrs names nTSecurityDescriptor: without it AD asks for the SACL too and
+// returns no descriptor at all to a reader lacking SeSecurityPrivilege.
+func sdFlags(attrs []string, controls []ldap.Control) []ldap.Control {
+	if !slices.ContainsFunc(attrs, func(a string) bool { return strings.EqualFold(a, "nTSecurityDescriptor") }) {
+		return controls
+	}
+	// BER SEQUENCE { INTEGER 7 }: OWNER|GROUP|DACL_SECURITY_INFORMATION.
+	return append(controls, ldap.NewControlString(ControlTypeSDFlags, true, "\x30\x03\x02\x01\x07"))
+}
 
 var guidRE = regexp.MustCompile(`^\{?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}?$`)
 
@@ -113,7 +128,7 @@ func (c *Client) Get(ctx context.Context, id, class string, attrs []string) (*ld
 	if err != nil {
 		return nil, err
 	}
-	res, err := conn.Search(ldap.NewSearchRequest(dn, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 1, 0, false, class, attrs, nil))
+	res, err := conn.Search(ldap.NewSearchRequest(dn, ldap.ScopeBaseObject, ldap.NeverDerefAliases, 1, 0, false, class, attrs, sdFlags(attrs, nil)))
 	if ldap.IsErrorWithCode(err, ldap.LDAPResultNoSuchObject) || err == nil && len(res.Entries) == 0 {
 		return nil, fmt.Errorf("%q: %w for this tool", id, ErrNoMatch)
 	}
