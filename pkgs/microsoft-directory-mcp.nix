@@ -21,7 +21,7 @@ buildGoModule (finalAttrs: {
     ];
   };
 
-  vendorHash = "sha256-FLeIO57QGUnE77hbJZmPa1b2TVBW7SRnwxtqjY7vAnM=";
+  vendorHash = "sha256-ii6GAGXNS/3HqdPnD5X9uy/8RFvpQvpUr1rque5qLws=";
 
   subPackages = [ "cmd/microsoft-directory-mcp" ];
   env.CGO_ENABLED = 0;
