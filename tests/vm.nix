@@ -545,7 +545,7 @@ let
     _, listed = post({"jsonrpc": "2.0", "id": next(ids), "method": "tools/list"}, session)
     tools = sorted(t["name"] for t in listed["result"]["tools"])
     assert tools == ["ad_api", "ad_computer", "ad_gpo", "ad_group", "ad_object", "ad_ou", "ad_policy", "ad_status", "ad_topology", "ad_user",
-                     "entra_api", "entra_app", "entra_audit", "entra_device", "entra_group", "entra_license", "entra_org", "entra_role", "entra_status", "entra_user"], tools
+                     "entra_api", "entra_app", "entra_audit", "entra_device", "entra_group", "entra_intune", "entra_license", "entra_org", "entra_role", "entra_status", "entra_user"], tools
 
     ad = call("ad_status", {})
     print("ad_status", json.dumps(ad))
@@ -572,15 +572,19 @@ let
     assert entra["password_writeback"] == {"value": "off", "source": "operator-declared"}, entra
     hidden = {h["tool"] + " " + h["action"]: h["reason"] for h in entra["hidden_actions"]}
     # The token has no Group.* or Device.* write permission: those entra-objects and entra-delete writes are hidden.
-    assert sorted(hidden) == ["entra_device delete",
+    # Nor Security*, ServiceHealth/ServiceMessage, DeviceManagementConfiguration/ServiceConfig or Directory.Read.All.
+    assert sorted(hidden) == ["entra_defender alerts", "entra_defender incidents", "entra_device delete",
                               "entra_group create", "entra_group delete", "entra_group edit", "entra_group restore",
+                              "entra_health issues", "entra_health messages", "entra_health services",
+                              "entra_intune autopilot", "entra_intune compliance", "entra_intune config_profiles",
                               "entra_policy auth_methods_policy", "entra_policy conditional_access", "entra_policy named_locations", "entra_policy security_defaults",
-                              "entra_risk risk_detections", "entra_risk risky_users", "entra_role eligibility", "entra_signin search", "entra_user auth_methods", "entra_user registration"], sorted(hidden)
+                              "entra_risk risk_detections", "entra_risk risky_users", "entra_role eligibility", "entra_signin search",
+                              "entra_user app_assignments", "entra_user auth_methods", "entra_user registration"], sorted(hidden)
     # AuditLog.Read.All is granted: sign-ins are hidden for the licence alone.
     assert hidden["entra_signin search"] == "licence: needs P1", hidden
     assert ad["probe"]["bound"], ad
     assert {"dns": "corp.example.com", "netbios": "CORP", "dn": "DC=corp,DC=example,DC=com"} in ad["probe"]["domains"], ad
-    assert ad["probe"]["reads"] == {"pso-read": "ok"}, ad["probe"]
+    assert ad["probe"]["reads"] == {"pso-read": "ok", "repl-read": "ok"}, ad["probe"]
 
     # ad_user search across a cursor: the 250 seeded users.
     page = call("ad_user", {"action": "search", "filter": "(sAMAccountName=vmuser*)"})
